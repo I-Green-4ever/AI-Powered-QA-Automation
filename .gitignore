@@ -8,6 +8,9 @@ node_modules/
 /playwright/.auth/
 /.playwright-mcp/
 
+# Nested clone (separate Git repo); do not commit
+/AI-Powered-QA-Automation/
+
 # Environment
 .env
 .env.*
