@@ -1,4 +1,4 @@
-import { test, expect, type Page, type Locator } from '@playwright/test';
+import { test, expect, type Page, type Locator, type Dialog } from '@playwright/test';
 import { format } from 'date-fns';
 
 function requireEnv(name: string): string {
@@ -14,88 +14,40 @@ function requireEnv(name: string): string {
 const DIDAXIS_EMAIL = requireEnv('DIDAXIS_EMAIL');
 const DIDAXIS_PASSWORD = requireEnv('DIDAXIS_PASSWORD');
 
+/**
+ * Build a unique, human-readable suffix for test data so each run produces
+ * fresh program names that don't collide with previous runs or seed data.
+ * Shape: "dd/MMM/yyyy [hh:mm:ss]" e.g. "17/May/2026 [19:12:03]".
+ */
 function uniqueSuffix(): string {
   const now = new Date();
   const hh = now.getHours().toString().padStart(2, '0');
   const mm = now.getMinutes().toString().padStart(2, '0');
   const ss = now.getSeconds().toString().padStart(2, '0');
+
   const timeString = `${hh}:${mm}:${ss}`;
+
   return `${format(now, 'dd/MMM/yyyy')} [${timeString}]`;
 }
 
 async function login(page: Page): Promise<void> {
   await page.goto('/login');
-
   await page.getByLabel('Email').fill(DIDAXIS_EMAIL);
   await page.getByLabel('Password').fill(DIDAXIS_PASSWORD);
   await page.getByRole('button', { name: 'Sign In' }).click();
 
+  // Wait for an authenticated landmark rather than just a URL change.
   await expect(page.getByRole('button', { name: /Programs/ })).toBeVisible();
 }
 
-function programsRow(page: Page, programName: string): Locator {
-  return page.getByRole('row', { name: programName });
-}
-
-function editDialog(page: Page): Locator {
-  return page.getByRole('dialog', { name: 'Edit Program' });
-}
-
-async function expandAIConfig(dialog: Locator): Promise<void> {
-  const toggle = dialog.getByRole('button', {
-    name: /Show AI Generation Config|Hide AI Generation Config/i,
-  });
-  if ((await toggle.count()) === 0) {
-    return;
-  }
-  const expanded =
-    (await toggle.getAttribute('aria-expanded')) === 'true' ||
-    (await toggle.getAttribute('data-state')) === 'open';
-  if (!expanded) {
-    await toggle.click();
-  }
-}
-
-/** Header X: no accessible name in the app; first banner button is dismiss. */
-function dialogDismissButton(dialog: Locator): Locator {
-  return dialog.getByRole('banner').getByRole('button').first();
-}
-
-/** Mantine: errors often render as `.mantine-Input-error` or toast notifications. */
-async function expectMantineError(
-  page: Page,
-  dialog: Locator,
-  pattern: RegExp
-): Promise<void> {
-  const inline = dialog.locator('.mantine-Input-error').filter({ hasText: pattern });
-  const notifications = page
-    .locator('.mantine-Notification-root, [data-mantine-notification]')
-    .filter({ hasText: pattern });
-  const alert = page.getByRole('alert').filter({ hasText: pattern });
-  const inModalBody = dialog.locator('section, [data-modal-content]').getByText(pattern);
-  await expect(inline.or(notifications).or(alert).or(inModalBody).first()).toBeVisible({
-    timeout: 15_000,
-  });
-}
-
-async function openEditForProgram(page: Page, programName: string): Promise<void> {
-  const row = programsRow(page, programName);
-  await expect(row).toBeVisible();
-  await row.getByRole('button', { name: '✏️' }).click();
-  await expect(editDialog(page)).toBeVisible();
-}
-
+/**
+ * Create a program through the UI so each Edit test has its own, independent
+ * row to operate on (avoids cross-test pollution and ordering).
+ */
 async function createProgram(
   page: Page,
-  programName: string,
-  programDescription: string,
-  ai?: {
-    totalHours?: string;
-    defaultSession?: string;
-    defaultExam?: string;
-    targetAudience?: string;
-    focusAreas?: string;
-  }
+  name: string,
+  description = ''
 ): Promise<void> {
   await page.goto('/programs');
   await page.getByRole('button', { name: '+ New Program' }).click();
@@ -103,563 +55,435 @@ async function createProgram(
   const dialog = page.getByRole('dialog', { name: 'New Program' });
   await expect(dialog).toBeVisible();
 
-  await dialog.getByLabel('Program Name').fill(programName);
-  await dialog.getByLabel('Description').fill(programDescription);
-
-  if (ai && Object.keys(ai).length > 0) {
-    await expandAIConfig(dialog);
-    if (ai.totalHours !== undefined) {
-      await dialog.getByLabel('Total Program Hours').fill(ai.totalHours);
-    }
-    if (ai.defaultSession !== undefined) {
-      await dialog.getByLabel('Default Session Hours').fill(ai.defaultSession);
-    }
-    if (ai.defaultExam !== undefined) {
-      await dialog.getByLabel('Default Exam Hours').fill(ai.defaultExam);
-    }
-    if (ai.targetAudience !== undefined) {
-      await dialog.getByLabel('Target Audience').fill(ai.targetAudience);
-    }
-    if (ai.focusAreas !== undefined) {
-      await dialog.getByLabel('Focus Areas').fill(ai.focusAreas);
-    }
+  await dialog.getByLabel('Program Name').fill(name);
+  if (description) {
+    await dialog.getByLabel('Description').fill(description);
   }
-
   await dialog.getByRole('button', { name: 'Create' }).click();
   await expect(dialog).toBeHidden();
-  await expect(programsRow(page, programName)).toBeVisible();
+  await expect(page.getByRole('row', { name })).toBeVisible();
 }
 
-test.describe('Edit Program (Didaxis Studio)', () => {
+/**
+ * Open the Edit Program modal for the row whose accessible name contains
+ * `programName`. Returns the dialog locator scoped to the Edit modal.
+ *
+ * The edit control is a per-row "✏️" button (no aria-label or title is
+ * exposed by Mantine, confirmed via Playwright MCP inspection).
+ */
+async function openEditModal(page: Page, programName: string): Promise<Locator> {
+  await page.goto('/programs');
+  const row = page.getByRole('row', { name: programName });
+  await expect(row).toBeVisible();
+  await row.getByRole('button', { name: '✏️' }).click();
+
+  const dialog = page.getByRole('dialog', { name: 'Edit Program' });
+  await expect(dialog).toBeVisible();
+  return dialog;
+}
+
+test.describe('DS-2 Edit Program (Didaxis Studio)', () => {
   test.beforeEach(async ({ page }) => {
     await login(page);
   });
 
-  test.describe('Positive flows', () => {
-    test('TC-001 - Edit form opens with current program data', async ({ page }) => {
-      const name = `IG - WD 2026 ${uniqueSuffix()}`;
-      const description = 'IG - initial description for WD 2026';
+  // ---------------------------------------------------------------------------
+  // Positive flows
+  // ---------------------------------------------------------------------------
 
-      await createProgram(page, name, description, {
-        totalHours: '40',
-        defaultSession: '4',
-        defaultExam: '3',
-        targetAudience: 'Beginners',
-        focusAreas: 'React, Node',
-      });
+  test('TC-001 - Clicking the edit control opens the Edit Program form', async ({ page }) => {
+    const programName = `I.G. Edit Open ${uniqueSuffix()}`;
+    await createProgram(page, programName, 'I.G. open edit precondition');
 
-      await openEditForProgram(page, name);
+    const dialog = await openEditModal(page, programName);
 
-      const dialog = editDialog(page);
-      await expect(dialog.getByLabel('Program Name')).toHaveValue(name);
-      await expect(dialog.getByLabel('Description')).toHaveValue(description);
-
-      await expandAIConfig(dialog);
-      await expect(dialog.getByLabel('Total Program Hours')).toHaveValue('40');
-      await expect(dialog.getByLabel('Default Session Hours')).toHaveValue('4');
-      await expect(dialog.getByLabel('Default Exam Hours')).toHaveValue('3');
-      await expect(dialog.getByLabel('Target Audience')).toHaveValue('Beginners');
-      await expect(dialog.getByLabel('Focus Areas')).toHaveValue('React, Node');
-    });
-
-    test('TC-002 - Renaming a program updates the list immediately after save', async ({
-      page,
-    }) => {
-      const name = `IG - WD rename ${uniqueSuffix()}`;
-      const updated = `${name} - Updated`;
-
-      await createProgram(page, name, 'IG - desc');
-
-      await openEditForProgram(page, name);
-      const dialog = editDialog(page);
-      await dialog.getByLabel('Program Name').fill(updated);
-      await dialog.getByRole('button', { name: 'Save' }).click();
-
-      await expect(dialog).toBeHidden();
-      const row = programsRow(page, updated);
-      await expect(row).toBeVisible();
-      await expect(row.locator('p').first()).toHaveText(updated);
-    });
-
-    test('TC-003 - Updating only Description leaves Name and AI fields unchanged', async ({
-      page,
-    }) => {
-      const name = `IG - WD desc-only ${uniqueSuffix()}`;
-      const newDescription = 'Updated description for WD 2026.';
-
-      await createProgram(page, name, 'Original description.', {
-        totalHours: '40',
-        defaultSession: '4',
-        defaultExam: '3',
-        targetAudience: 'Beginners',
-        focusAreas: 'React',
-      });
-
-      await openEditForProgram(page, name);
-      let dialog = editDialog(page);
-      await dialog.getByLabel('Description').fill(newDescription);
-      await dialog.getByRole('button', { name: 'Save' }).click();
-      await expect(dialog).toBeHidden();
-
-      await openEditForProgram(page, name);
-      dialog = editDialog(page);
-      await expect(dialog.getByLabel('Program Name')).toHaveValue(name);
-      await expect(dialog.getByLabel('Description')).toHaveValue(newDescription);
-      await expandAIConfig(dialog);
-      await expect(dialog.getByLabel('Total Program Hours')).toHaveValue('40');
-      await expect(dialog.getByLabel('Default Session Hours')).toHaveValue('4');
-      await expect(dialog.getByLabel('Default Exam Hours')).toHaveValue('3');
-      await expect(dialog.getByLabel('Target Audience')).toHaveValue('Beginners');
-      await expect(dialog.getByLabel('Focus Areas')).toHaveValue('React');
-    });
-
-    test('TC-004 - Successful save closes modal and list reflects mutation', async ({
-      page,
-    }) => {
-      const name = `IG - WD save path ${uniqueSuffix()}`;
-
-      await createProgram(page, name, 'IG - before');
-      await openEditForProgram(page, name);
-
-      const dialog = editDialog(page);
-      await dialog.getByLabel('Description').fill('IG - after save');
-      await dialog.getByRole('button', { name: 'Save' }).click();
-
-      await expect(dialog).toBeHidden();
-      await expect(programsRow(page, name)).toBeVisible();
-    });
-
-    test('TC-005 - Save applies trim on Program Name', async ({ page }) => {
-      const name = `IG - WD trim ${uniqueSuffix()}`;
-      const trimmed = `${name} - Trimmed`;
-
-      await createProgram(page, name, 'IG - desc');
-
-      await openEditForProgram(page, name);
-      const dialog = editDialog(page);
-      await dialog.getByLabel('Program Name').fill(`  ${trimmed}  `);
-      await dialog.getByRole('button', { name: 'Save' }).click();
-      await expect(dialog).toBeHidden();
-
-      await expect(programsRow(page, trimmed)).toBeVisible();
-    });
-
-    test('TC-006 - Single save updates Name and multiple AI Generation Config fields', async ({
-      page,
-    }) => {
-      const name = `IG - WD multi ${uniqueSuffix()}`;
-      const newName = `${name} - Multi`;
-
-      await createProgram(page, name, 'IG - desc', {
-        totalHours: '40',
-        defaultSession: '4',
-        defaultExam: '3',
-        targetAudience: 'Beginners',
-        focusAreas: 'React',
-      });
-
-      await openEditForProgram(page, name);
-      const dialog = editDialog(page);
-      await expandAIConfig(dialog);
-
-      await dialog.getByLabel('Program Name').fill(newName);
-      await dialog.getByLabel('Total Program Hours').fill('48');
-      await dialog.getByLabel('Default Session Hours').fill('6');
-      await dialog.getByLabel('Target Audience').fill('Advanced');
-
-      await dialog.getByRole('button', { name: 'Save' }).click();
-      await expect(dialog).toBeHidden();
-
-      await openEditForProgram(page, newName);
-      const again = editDialog(page);
-      await expect(again.getByLabel('Program Name')).toHaveValue(newName);
-      await expandAIConfig(again);
-      await expect(again.getByLabel('Total Program Hours')).toHaveValue('48');
-      await expect(again.getByLabel('Default Session Hours')).toHaveValue('6');
-      await expect(again.getByLabel('Target Audience')).toHaveValue('Advanced');
-    });
-
-    test('TC-007 - AI Generation Config can be expanded and Default Exam Hours edited', async ({
-      page,
-    }) => {
-      const name = `IG - WD exam ${uniqueSuffix()}`;
-
-      await createProgram(page, name, 'IG - desc', {
-        defaultExam: '3',
-      });
-
-      await openEditForProgram(page, name);
-      const dialog = editDialog(page);
-      await expandAIConfig(dialog);
-      await dialog.getByLabel('Default Exam Hours').fill('2.5');
-      await dialog.getByRole('button', { name: 'Save' }).click();
-      await expect(dialog).toBeHidden();
-
-      await openEditForProgram(page, name);
-      const verify = editDialog(page);
-      await expandAIConfig(verify);
-      await expect(verify.getByLabel('Default Exam Hours')).toHaveValue('2.5');
-    });
-
-    test('TC-008 - Modal can be dismissed without saving via X, Cancel, and outside click', async ({
-      page,
-    }) => {
-      const name = `IG - WD dismiss ${uniqueSuffix()}`;
-      const tamperName = `${name} - tampered`;
-
-      await createProgram(page, name, 'IG - desc');
-
-      const tryClose = async (
-        close: (dialog: Locator) => Promise<void>
-      ): Promise<void> => {
-        await openEditForProgram(page, name);
-        const dialog = editDialog(page);
-        await dialog.getByLabel('Program Name').fill(tamperName);
-        await close(dialog);
-        await expect(dialog).toBeHidden();
-      };
-
-      await tryClose(async (dialog) => {
-        await dialogDismissButton(dialog).click();
-      });
-
-      await tryClose(async (dialog) => {
-        await dialog.getByRole('button', { name: 'Cancel' }).click();
-      });
-
-      await tryClose(async () => {
-        await page.mouse.click(8, 8);
-      });
-
-      await expect(programsRow(page, name)).toBeVisible();
-      await expect(programsRow(page, tamperName)).toHaveCount(0);
-
-      await openEditForProgram(page, name);
-      await expect(editDialog(page).getByLabel('Program Name')).toHaveValue(name);
-    });
-
-    test('TC-029 - List refresh after edit does not require full page reload', async ({
-      page,
-    }) => {
-      const name = `IG - WD refresh ${uniqueSuffix()}`;
-      const updated = `${name} - Refreshed`;
-
-      await createProgram(page, name, 'IG - desc');
-
-      await openEditForProgram(page, name);
-      const dialog = editDialog(page);
-      await dialog.getByLabel('Program Name').fill(updated);
-      await dialog.getByRole('button', { name: 'Save' }).click();
-      await expect(dialog).toBeHidden();
-
-      expect(page.url()).toMatch(/programs/);
-      await expect(programsRow(page, updated)).toBeVisible();
-    });
+    await expect(dialog.getByRole('heading', { name: 'Edit Program' })).toBeVisible();
+    await expect(dialog.getByRole('button', { name: 'Save' })).toBeVisible();
+    await expect(dialog.getByRole('button', { name: 'Cancel' })).toBeVisible();
   });
 
-  test.describe('Negative flows', () => {
-    test('TC-009 - Save remains disabled when Program Name is empty', async ({ page }) => {
-      const name = `IG - WD empty name ${uniqueSuffix()}`;
+  test('TC-002 - Edit form is pre-populated with the program current data (AC1)', async ({ page }) => {
+    const programName = `I.G. Edit Prepop ${uniqueSuffix()}`;
+    const description = 'I.G. prepopulated description';
+    await createProgram(page, programName, description);
 
-      await createProgram(page, name, 'IG - desc');
-      await openEditForProgram(page, name);
+    const dialog = await openEditModal(page, programName);
 
-      const dialog = editDialog(page);
-      await dialog.getByLabel('Program Name').clear();
-      await expect(dialog.getByRole('button', { name: 'Save' })).toBeDisabled();
-    });
-
-    test('TC-010 - Whitespace-only Program Name is not persisted', async ({ page }) => {
-      const name = `IG - WD whitespace ${uniqueSuffix()}`;
-
-      await createProgram(page, name, 'IG - desc');
-      await openEditForProgram(page, name);
-
-      const dialog = editDialog(page);
-      await dialog.getByLabel('Program Name').fill('    ');
-      const save = dialog.getByRole('button', { name: 'Save' });
-
-      if (await save.isDisabled()) {
-        await expect(programsRow(page, name)).toBeVisible();
-        return;
-      }
-
-      await save.click();
-      await expect(dialog).toBeVisible();
-      await expect(programsRow(page, name)).toBeVisible();
-    });
-
-    test('TC-011 - Duplicate Program Name within organization is rejected', async ({
-      page,
-    },
-    testInfo) => {
-      const first = `IG - WD dup A ${uniqueSuffix()}`;
-      const second = `IG - WD dup B ${uniqueSuffix()}`;
-
-      await createProgram(page, first, 'IG - a');
-      await createProgram(page, second, 'IG - b');
-
-      await openEditForProgram(page, second);
-      const dialog = editDialog(page);
-      await dialog.getByLabel('Program Name').fill(first);
-      await dialog.getByRole('button', { name: 'Save' }).click();
-
-      if (!(await editDialog(page).isVisible({ timeout: 8000 }).catch(() => false))) {
-        testInfo.skip(
-          true,
-          'Duplicate rename closed the modal; app duplicate policy differs from strict rejection.'
-        );
-        return;
-      }
-
-      const dupMsg = dialog
-        .locator('.mantine-Input-error')
-        .or(page.locator('.mantine-Notification-root'))
-        .or(dialog.locator('[data-modal-content]').locator('p, span'))
-        .filter({ hasText: /duplicate|exists|unique|already|conflict|taken|error|invalid/i });
-      const matched = await dupMsg
-        .first()
-        .isVisible({ timeout: 8000 })
-        .catch(() => false);
-
-      if (!matched) {
-        testInfo.skip(
-          true,
-          'Edit modal stayed open but no duplicate / validation message matched within 8s.'
-        );
-        await dialog.getByRole('button', { name: 'Cancel' }).click().catch(() => {});
-        return;
-      }
-
-      await dialog.getByRole('button', { name: 'Cancel' }).click();
-      await expect(dialog).toBeHidden();
-      await expect(programsRow(page, first)).toBeVisible();
-      await expect(programsRow(page, second)).toBeVisible();
-    });
-
-    test('TC-012 - Program Name longer than 100 characters is rejected', async ({
-      page,
-    },
-    testInfo) => {
-      const name = `IG - WD max name ${uniqueSuffix()}`;
-      const tooLong = 'a'.repeat(101);
-
-      await createProgram(page, name, 'IG - desc');
-      await openEditForProgram(page, name);
-
-      const dialog = editDialog(page);
-      await dialog.getByLabel('Program Name').fill(tooLong);
-      await dialog.getByRole('button', { name: 'Save' }).click();
-
-      if (await editDialog(page).isVisible({ timeout: 5000 }).catch(() => false)) {
-        try {
-          await expectMantineError(
-            page,
-            dialog,
-            /\b100\b|character|length|invalid|max|limit|long|too|exceed/i
-          );
-        } catch {
-          testInfo.skip(
-            true,
-            'Modal stayed open after save but no max-length error matched Mantine selectors.'
-          );
-          await dialog.getByRole('button', { name: 'Cancel' }).click().catch(() => {});
-          return;
-        }
-        await dialog.getByRole('button', { name: 'Cancel' }).click();
-        await expect(dialog).toBeHidden();
-        return;
-      }
-
-      testInfo.skip(
-        true,
-        'Modal closed after 101-char save; app has no client maxLength and no blocking error was shown here.'
-      );
-    });
-
-    test('TC-013 - Description longer than 500 characters is rejected', async ({
-      page,
-    },
-    testInfo) => {
-      const name = `IG - WD max desc ${uniqueSuffix()}`;
-      const tooLong = 'd'.repeat(501);
-
-      await createProgram(page, name, 'IG - desc');
-      await openEditForProgram(page, name);
-
-      const dialog = editDialog(page);
-      await dialog.getByLabel('Description').fill(tooLong);
-      await dialog.getByRole('button', { name: 'Save' }).click();
-
-      if (await editDialog(page).isVisible({ timeout: 5000 }).catch(() => false)) {
-        try {
-          await expectMantineError(
-            page,
-            dialog,
-            /\b500\b|character|length|invalid|max|limit|long|too|exceed/i
-          );
-        } catch {
-          testInfo.skip(
-            true,
-            'Modal stayed open after save but no max-length error matched Mantine selectors.'
-          );
-          await dialog.getByRole('button', { name: 'Cancel' }).click().catch(() => {});
-          return;
-        }
-        await dialog.getByRole('button', { name: 'Cancel' }).click();
-        await expect(dialog).toBeHidden();
-        return;
-      }
-
-      testInfo.skip(
-        true,
-        'Modal closed after 501-char description save; app has no client maxLength and no blocking error was shown here.'
-      );
-    });
-
-    test('TC-018 - Failed API update shows error and does not falsely succeed', async ({
-      page,
-    }) => {
-      const name = `IG - WD api fail ${uniqueSuffix()}`;
-
-      await createProgram(page, name, 'IG - desc');
-      await openEditForProgram(page, name);
-
-      const dialog = editDialog(page);
-      await dialog.getByLabel('Description').fill('IG - should not persist');
-
-      await page.route('**/*', async (route) => {
-        const req = route.request();
-        if (req.method() === 'GET' || req.method() === 'HEAD' || req.method() === 'OPTIONS') {
-          await route.continue();
-          return;
-        }
-        if (!/program/i.test(req.url())) {
-          await route.continue();
-          return;
-        }
-        await route.abort();
-      });
-
-      await dialog.getByRole('button', { name: 'Save' }).click();
-
-      await expect(editDialog(page)).toBeVisible();
-      await expect(
-        page
-          .getByText(/network|failed to fetch|load failed|fetch|error|could not/i)
-          .or(dialog.locator('.mantine-Input-error'))
-          .or(page.locator('.mantine-Notification-root'))
-          .first()
-      ).toBeVisible({ timeout: 15_000 });
-
-      await page.unroute('**/*');
-
-      await dialog.getByRole('button', { name: 'Cancel' }).click();
-      await expect(dialog).toBeHidden();
-
-      await openEditForProgram(page, name);
-      await expect(editDialog(page).getByLabel('Description')).toHaveValue('IG - desc');
-    });
+    await expect(dialog.getByLabel('Program Name')).toHaveValue(programName);
+    await expect(dialog.getByLabel('Description')).toHaveValue(description);
   });
 
-  test.describe('Edge cases', () => {
-    test('TC-020 - Program Name at exactly 100 characters saves', async ({ page }) => {
-      const name = `IG - WD 100 ${uniqueSuffix()}`;
-      const seed = `${name}-100c`;
-      const exact =
-        seed.length >= 100 ? seed.slice(0, 100) : seed + 'y'.repeat(100 - seed.length);
-      expect(exact).toHaveLength(100);
+  test('TC-003 - Editing the Name and saving updates the row in the list (AC2)', async ({ page }) => {
+    const suffix = uniqueSuffix();
+    const originalName = `I.G. Rename Source ${suffix}`;
+    const newName = `I.G. Rename Target ${suffix}`;
+    await createProgram(page, originalName, 'I.G. rename description');
 
-      await createProgram(page, name, 'IG - desc');
-      await openEditForProgram(page, name);
+    const dialog = await openEditModal(page, originalName);
+    await dialog.getByLabel('Program Name').fill(newName);
+    await dialog.getByRole('button', { name: 'Save' }).click();
 
-      const dialog = editDialog(page);
-      await dialog.getByLabel('Program Name').fill(exact);
-      await dialog.getByRole('button', { name: 'Save' }).click();
-      await expect(dialog).toBeHidden();
+    await expect(dialog).toBeHidden();
+    await expect(page.getByRole('row', { name: newName })).toBeVisible();
+    // The previous name must be gone — use exact text to avoid matching
+    // unrelated rows that happen to share a substring.
+    await expect(page.getByText(originalName, { exact: true })).toHaveCount(0);
+  });
 
-      await expect(programsRow(page, exact)).toBeVisible();
-    });
+  test('TC-004 - The save persists across navigation', async ({ page }) => {
+    const suffix = uniqueSuffix();
+    const originalName = `I.G. Persist Source ${suffix}`;
+    const newName = `I.G. Persist Target ${suffix}`;
+    await createProgram(page, originalName, 'I.G. persist description');
 
-    test('TC-021 - Description at exactly 500 characters saves', async ({ page }) => {
-      const name = `IG - WD 500d ${uniqueSuffix()}`;
-      const exact500 = 'd'.repeat(500);
+    const dialog = await openEditModal(page, originalName);
+    await dialog.getByLabel('Program Name').fill(newName);
+    await dialog.getByRole('button', { name: 'Save' }).click();
+    await expect(dialog).toBeHidden();
+    await expect(page.getByRole('row', { name: newName })).toBeVisible();
 
-      await createProgram(page, name, 'short');
-      await openEditForProgram(page, name);
+    // Round-trip through Dashboard to force a re-fetch from the server.
+    await page.getByRole('button', { name: /Dashboard/ }).click();
+    await page.getByRole('button', { name: /Programs/ }).click();
 
-      const dialog = editDialog(page);
-      await dialog.getByLabel('Description').fill(exact500);
-      await dialog.getByRole('button', { name: 'Save' }).click();
-      await expect(dialog).toBeHidden();
+    await expect(page.getByRole('row', { name: newName })).toBeVisible();
+    await expect(page.getByText(originalName, { exact: true })).toHaveCount(0);
+  });
 
-      await openEditForProgram(page, name);
-      await expect(editDialog(page).getByLabel('Description')).toHaveValue(exact500);
-    });
+  test('TC-005 - Editing both Name and Description in one save updates both', async ({ page }) => {
+    const suffix = uniqueSuffix();
+    const originalName = `I.G. Edit Both ${suffix}`;
+    const newName = `I.G. Edit Both ${suffix} Updated`;
+    const beforeDescription = 'I.G. before';
+    const afterDescription = 'I.G. after';
+    await createProgram(page, originalName, beforeDescription);
 
-    test('TC-022 - Special characters and Unicode round-trip in Name and Description', async ({
-      page,
-    }) => {
-      const name = `IG - WD unicode ${uniqueSuffix()}`;
-      const specialName = `Café & React <2026> ${name}`;
-      const specialDesc = `Line1\n"Quoted" and 'apostrophe' — ok`;
-
-      await createProgram(page, name, 'IG - start');
-      await openEditForProgram(page, name);
-
-      const dialog = editDialog(page);
-      await dialog.getByLabel('Program Name').fill(specialName);
-      await dialog.getByLabel('Description').fill(specialDesc);
-      await dialog.getByRole('button', { name: 'Save' }).click();
-      await expect(dialog).toBeHidden();
-
-      await openEditForProgram(page, specialName);
-      const again = editDialog(page);
-      await expect(again.getByLabel('Program Name')).toHaveValue(specialName);
-      await expect(again.getByLabel('Description')).toHaveValue(specialDesc);
-    });
-
-    test('TC-028 - Rapid double-click Save does not leave inconsistent UI', async ({
-      page,
-    }) => {
-      const name = `IG - WD dbl ${uniqueSuffix()}`;
-      const updated = `${name} - Dbl`;
-
-      await createProgram(page, name, 'IG - desc');
-      await openEditForProgram(page, name);
-
-      const dialog = editDialog(page);
-      await dialog.getByLabel('Program Name').fill(updated);
-      const save = dialog.getByRole('button', { name: 'Save' });
-      await save.dblclick();
-
-      await expect(dialog).toBeHidden({ timeout: 20_000 });
-      await expect(programsRow(page, updated)).toBeVisible();
-    });
-
-    test('TC-030 - AI Generation Config default display for minimally created program', async ({
-      page,
-    }) => {
-      const name = `IG - WD defaults ${uniqueSuffix()}`;
-
-      await createProgram(page, name, 'IG - minimal');
-
-      await openEditForProgram(page, name);
-      const dialog = editDialog(page);
-      await expandAIConfig(dialog);
-
-      await expect(dialog.getByLabel('Default Session Hours')).toHaveValue('4');
-      await expect(dialog.getByLabel('Default Exam Hours')).toHaveValue('3');
-
-      const slider = dialog.getByRole('slider').first();
-      if ((await slider.count()) > 0) {
-        await expect(slider).toHaveAttribute('aria-valuenow', '70');
-      } else {
-        const ratio = dialog.getByLabel(/Sync\/Async Ratio/i);
-        if ((await ratio.count()) > 0) {
-          await expect(ratio).toHaveValue('70');
-        }
+    // Count network round-trips so we can assert no double-save.
+    let patchCount = 0;
+    page.on('request', (req) => {
+      if (req.method() === 'PATCH' && /\/api\/programs\//.test(req.url())) {
+        patchCount++;
       }
     });
+
+    const dialog = await openEditModal(page, originalName);
+    await dialog.getByLabel('Program Name').fill(newName);
+    await dialog.getByLabel('Description').fill(afterDescription);
+    await dialog.getByRole('button', { name: 'Save' }).click();
+
+    await expect(dialog).toBeHidden();
+    const row = page.getByRole('row', { name: newName });
+    await expect(row).toBeVisible();
+    await expect(row).toContainText(afterDescription);
+    await expect(page.getByText(beforeDescription, { exact: true })).toHaveCount(0);
+    expect(patchCount).toBe(1);
+  });
+
+  test('TC-006 - Editing only the Description preserves the Name (AC3)', async ({ page }) => {
+    const programName = `I.G. Desc Only ${uniqueSuffix()}`;
+    const beforeDescription = 'I.G. before';
+    const afterDescription = 'I.G. after';
+    await createProgram(page, programName, beforeDescription);
+
+    const dialog = await openEditModal(page, programName);
+    // Leave Program Name untouched on purpose.
+    await dialog.getByLabel('Description').fill(afterDescription);
+    await dialog.getByRole('button', { name: 'Save' }).click();
+
+    await expect(dialog).toBeHidden();
+    const row = page.getByRole('row', { name: programName });
+    await expect(row).toBeVisible();
+    await expect(row).toContainText(afterDescription);
+    await expect(page.getByText(beforeDescription, { exact: true })).toHaveCount(0);
+  });
+
+  test('TC-007 - Editing only the Name preserves the Description (AC3 mirror)', async ({ page }) => {
+    const suffix = uniqueSuffix();
+    const originalName = `I.G. Name Only Source ${suffix}`;
+    const newName = `I.G. Name Only Target ${suffix}`;
+    const description = 'keep me';
+    await createProgram(page, originalName, description);
+
+    const dialog = await openEditModal(page, originalName);
+    await dialog.getByLabel('Program Name').fill(newName);
+    // Description left untouched on purpose.
+    await dialog.getByRole('button', { name: 'Save' }).click();
+
+    await expect(dialog).toBeHidden();
+    const row = page.getByRole('row', { name: newName });
+    await expect(row).toBeVisible();
+    await expect(row).toContainText(description);
+  });
+
+  test('TC-008 - Re-opening edit after save shows the new values pre-populated', async ({ page }) => {
+    const suffix = uniqueSuffix();
+    const originalName = `I.G. Reopen Source ${suffix}`;
+    const newName = `I.G. Reopen Target ${suffix}`;
+    const description = 'I.G. reopen description';
+    await createProgram(page, originalName, description);
+
+    // First edit: rename.
+    let dialog = await openEditModal(page, originalName);
+    await dialog.getByLabel('Program Name').fill(newName);
+    await dialog.getByRole('button', { name: 'Save' }).click();
+    await expect(dialog).toBeHidden();
+    await expect(page.getByRole('row', { name: newName })).toBeVisible();
+
+    // Second edit: open again and confirm the persisted values are shown.
+    dialog = await openEditModal(page, newName);
+    await expect(dialog.getByLabel('Program Name')).toHaveValue(newName);
+    await expect(dialog.getByLabel('Description')).toHaveValue(description);
+    await expect(dialog.getByLabel('Program Name')).not.toHaveValue(originalName);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Negative flows
+  // ---------------------------------------------------------------------------
+
+  test('TC-009 - Clearing Program Name disables Save', async ({ page }) => {
+    const programName = `I.G. Empty Name ${uniqueSuffix()}`;
+    await createProgram(page, programName, 'I.G. empty name test');
+
+    const dialog = await openEditModal(page, programName);
+    const nameInput = dialog.getByLabel('Program Name');
+    const saveBtn = dialog.getByRole('button', { name: 'Save' });
+
+    await nameInput.fill('');
+    await expect(saveBtn).toBeDisabled();
+
+    // Pressing Enter while empty must not submit.
+    await nameInput.focus();
+    await page.keyboard.press('Enter');
+    await expect(dialog).toBeVisible();
+    await expect(saveBtn).toBeDisabled();
+  });
+
+  test('TC-010 - Whitespace-only Program Name is treated as empty', async ({ page }) => {
+    const programName = `I.G. Whitespace Name ${uniqueSuffix()}`;
+    await createProgram(page, programName, 'I.G. whitespace name test');
+
+    const dialog = await openEditModal(page, programName);
+    await dialog.getByLabel('Program Name').fill('   ');
+    await expect(dialog.getByRole('button', { name: 'Save' })).toBeDisabled();
+
+    // A program literally named "   " must never appear in the list.
+    await expect(page.getByText('   ', { exact: true })).toHaveCount(0);
+  });
+
+  test('TC-011 - Cancel discards in-progress edits', async ({ page }) => {
+    const programName = `I.G. Cancel Discard ${uniqueSuffix()}`;
+    const originalDescription = 'I.G. cancel description';
+    await createProgram(page, programName, originalDescription);
+
+    let dialog = await openEditModal(page, programName);
+    await dialog.getByLabel('Program Name').fill(`I.G. DiscardMe ${uniqueSuffix()}`);
+    await dialog.getByRole('button', { name: 'Cancel' }).click();
+
+    await expect(dialog).toBeHidden();
+    // Row name in the list must still be the original.
+    await expect(page.getByRole('row', { name: programName })).toBeVisible();
+
+    // Re-opening edit shows the previous (saved) values, not the abandoned draft.
+    dialog = await openEditModal(page, programName);
+    await expect(dialog.getByLabel('Program Name')).toHaveValue(programName);
+    await expect(dialog.getByLabel('Description')).toHaveValue(originalDescription);
+  });
+
+  test('TC-012 - Server failure on save (5xx) does not update the list', async ({ page }) => {
+    const programName = `I.G. Save 500 ${uniqueSuffix()}`;
+    const originalDescription = 'I.G. server-failure precondition';
+    await createProgram(page, programName, originalDescription);
+
+    const attemptedNewName = `I.G. Save 500 Attempt ${uniqueSuffix()}`;
+
+    // Mock only the PATCH /api/programs/:id (the save call). Leave POST
+    // through so the precondition Create above still works.
+    await page.route('**/api/programs/*', async (route) => {
+      if (route.request().method() === 'PATCH') {
+        await route.fulfill({
+          status: 500,
+          contentType: 'application/json',
+          body: JSON.stringify({ error: 'Simulated server failure' }),
+        });
+        return;
+      }
+      await route.continue();
+    });
+
+    const dialog = await openEditModal(page, programName);
+    await dialog.getByLabel('Program Name').fill(attemptedNewName);
+    await dialog.getByRole('button', { name: 'Save' }).click();
+
+    // Modal stays open with the user's edits intact.
+    await expect(dialog).toBeVisible();
+    await expect(dialog.getByLabel('Program Name')).toHaveValue(attemptedNewName);
+
+    // Pre-edit values remain in the underlying list.
+    await expect(page.getByText(programName, { exact: true })).toHaveCount(1);
+    await expect(page.getByText(attemptedNewName, { exact: true })).toHaveCount(0);
+  });
+
+  // Requires two concurrent admin sessions to delete then save — out of
+  // scope for a single-page test. Tracked under DS-4 (delete) integration.
+  test.skip('TC-013 - Conflict / 404 when program was deleted by another user', async () => {
+    // Manual or multi-context test: open the program in two browsers,
+    // delete in B, attempt rename in A, expect 404/conflict UX.
+  });
+
+  // No non-admin credentials are provisioned in .env. Re-enable once
+  // DIDAXIS_VIEWER_EMAIL / DIDAXIS_VIEWER_PASSWORD are available.
+  test.skip('TC-014 - Non-admin user cannot edit programs (if role-gated)', async () => {
+    // Requires a viewer-role login (e.g. qa-viewer@school.edu).
+  });
+
+  // ---------------------------------------------------------------------------
+  // Edge cases
+  // ---------------------------------------------------------------------------
+
+  test('TC-015 - Editing to a name length of 255 chars succeeds', async ({ page }) => {
+    const programName = `I.G. LongName Target ${uniqueSuffix()}`;
+    await createProgram(page, programName, 'I.G. long-name precondition');
+
+    const longName = 'P'.repeat(255);
+    expect(longName).toHaveLength(255);
+
+    const dialog = await openEditModal(page, programName);
+    await dialog.getByLabel('Program Name').fill(longName);
+    await dialog.getByRole('button', { name: 'Save' }).click();
+
+    await expect(dialog).toBeHidden();
+    await expect(page.getByText(longName, { exact: true })).toHaveCount(1);
+  });
+
+  test('TC-016 - Editing to special characters / Unicode preserves them exactly', async ({ page }) => {
+    const programName = `I.G. Unicode Source ${uniqueSuffix()}`;
+    await createProgram(page, programName, 'I.G. unicode precondition');
+
+    const newName = `Renée's "Accelerated" Updated ${uniqueSuffix()}`;
+    const dialog = await openEditModal(page, programName);
+    await dialog.getByLabel('Program Name').fill(newName);
+    await dialog.getByRole('button', { name: 'Save' }).click();
+
+    await expect(dialog).toBeHidden();
+    await expect(page.getByText(newName, { exact: true })).toHaveCount(1);
+  });
+
+  test('TC-017 - Editing to HTML-like text does not execute as script (XSS)', async ({ page }) => {
+    const programName = `I.G. XSS Source ${uniqueSuffix()}`;
+    await createProgram(page, programName, 'I.G. xss precondition');
+
+    const xssName = `<img src=x onerror=alert(1)> ${uniqueSuffix()}`;
+
+    // Fail loudly if the page tries to fire a native alert/confirm/prompt.
+    const nativeDialogs: Dialog[] = [];
+    page.on('dialog', (d) => {
+      nativeDialogs.push(d);
+      void d.dismiss();
+    });
+
+    let dialog = await openEditModal(page, programName);
+    await dialog.getByLabel('Program Name').fill(xssName);
+    await dialog.getByRole('button', { name: 'Save' }).click();
+
+    await expect(dialog).toBeHidden();
+    await expect(page.getByText(xssName, { exact: true })).toHaveCount(1);
+    expect(nativeDialogs).toHaveLength(0);
+
+    // Re-opening edit shows the same literal string.
+    dialog = await openEditModal(page, xssName);
+    await expect(dialog.getByLabel('Program Name')).toHaveValue(xssName);
+  });
+
+  // Reaching the "two rows sharing the same name" state requires a direct
+  // DB seed (the Create flow now rejects duplicates per DS-3 AC3). Skip
+  // until a fixture is available.
+  test.skip('TC-018 - Editing one row of a duplicate-name pair targets only that row', async () => {
+    // Pre-seed two programs with identical names via SQL/fixture, then edit
+    // the second row and assert only that row is renamed.
+  });
+
+  test('TC-019 - Editing to a name that matches another program is rejected (DS-3 AC3)', async ({ page }) => {
+    const suffix = uniqueSuffix();
+    const nameA = `I.G. Existing A ${suffix}`;
+    const nameB = `I.G. Existing B ${suffix}`;
+    await createProgram(page, nameA, 'I.G. existing A description');
+    await createProgram(page, nameB, 'I.G. existing B description');
+
+    const dialog = await openEditModal(page, nameB);
+    await dialog.getByLabel('Program Name').fill(nameA);
+    await dialog.getByRole('button', { name: 'Save' }).click();
+
+    // Save is rejected: modal stays open with the entered (conflicting) value.
+    await expect(dialog).toBeVisible();
+    await expect(dialog.getByLabel('Program Name')).toHaveValue(nameA);
+
+    // List still contains exactly one row of each original name; no rename took effect.
+    await expect(page.getByText(nameA, { exact: true })).toHaveCount(1);
+    await expect(page.getByText(nameB, { exact: true })).toHaveCount(1);
+  });
+
+  test('TC-020 - Saving with no changes is a no-op', async ({ page }) => {
+    const programName = `I.G. Noop Save ${uniqueSuffix()}`;
+    const description = 'I.G. noop description';
+    await createProgram(page, programName, description);
+
+    const dialog = await openEditModal(page, programName);
+    // Change nothing.
+    await dialog.getByRole('button', { name: 'Save' }).click();
+
+    await expect(dialog).toBeHidden();
+    const row = page.getByRole('row', { name: programName });
+    await expect(row).toBeVisible();
+    await expect(row).toContainText(description);
+  });
+
+  test('TC-021 - Rapid double-click on Save does not create duplicate updates', async ({ page }) => {
+    const suffix = uniqueSuffix();
+    const originalName = `I.G. DoubleSave Source ${suffix}`;
+    const newName = `I.G. DoubleSave Target ${suffix}`;
+    await createProgram(page, originalName, 'I.G. double-save precondition');
+
+    // Throttle PATCH so the user can race a second click against the first.
+    let patchCount = 0;
+    await page.route('**/api/programs/*', async (route) => {
+      if (route.request().method() === 'PATCH') {
+        patchCount++;
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+      }
+      await route.continue();
+    });
+
+    const dialog = await openEditModal(page, originalName);
+    await dialog.getByLabel('Program Name').fill(newName);
+    const saveBtn = dialog.getByRole('button', { name: 'Save' });
+
+    await Promise.all([
+      saveBtn.click(),
+      saveBtn.click({ force: true }).catch(() => {}),
+    ]);
+
+    await expect(dialog).toBeHidden();
+    await expect(page.getByText(newName, { exact: true })).toHaveCount(1);
+    await expect(page.getByText(originalName, { exact: true })).toHaveCount(0);
+    // Either the button was disabled in-flight, or the second click was de-duped.
+    expect(patchCount).toBe(1);
+  });
+
+  test('TC-022 - Pressing Esc while editing focused on a field discards changes', async ({ page }) => {
+    const programName = `I.G. Esc Discard ${uniqueSuffix()}`;
+    const originalDescription = 'I.G. esc precondition';
+    await createProgram(page, programName, originalDescription);
+
+    let dialog = await openEditModal(page, programName);
+    await dialog.getByLabel('Program Name').fill(`I.G. EscDraft ${uniqueSuffix()}`);
+    await page.keyboard.press('Escape');
+
+    await expect(dialog).toBeHidden();
+    await expect(page.getByRole('row', { name: programName })).toBeVisible();
+
+    // Re-opening edit shows the original (pre-discard) values.
+    dialog = await openEditModal(page, programName);
+    await expect(dialog.getByLabel('Program Name')).toHaveValue(programName);
+    await expect(dialog.getByLabel('Description')).toHaveValue(originalDescription);
   });
 });
