@@ -12,7 +12,8 @@
     "test:firefox": "playwright test --project=firefox",
     "test:webkit": "playwright test --project=webkit",
     "test:report": "playwright show-report",
-    "codegen": "playwright codegen"
+    "codegen": "playwright codegen",
+    "delete-programs": "tsx lib/delete-programs.ts"
   },
   "keywords": [],
   "author": "",
@@ -20,7 +21,8 @@
   "type": "commonjs",
   "devDependencies": {
     "@playwright/test": "^1.60.0",
-    "@types/node": "^25.7.0"
+    "@types/node": "^25.7.0",
+    "tsx": "^4.22.4"
   },
   "dependencies": {
     "date-fns": "^4.1.0",

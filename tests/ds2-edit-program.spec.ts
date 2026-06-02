@@ -1,4 +1,6 @@
-import { test, expect, type Page, type Locator, type Dialog } from '@playwright/test';
+import { test, expect } from '../fixtures/cleanup.fixture';
+import { createProgram } from './helpers/program';
+import type { Page, Locator, Dialog } from '@playwright/test';
 import { format } from 'date-fns';
 
 function requireEnv(name: string): string {
@@ -38,30 +40,6 @@ async function login(page: Page): Promise<void> {
 
   // Wait for an authenticated landmark rather than just a URL change.
   await expect(page.getByRole('button', { name: /Programs/ })).toBeVisible();
-}
-
-/**
- * Create a program through the UI so each Edit test has its own, independent
- * row to operate on (avoids cross-test pollution and ordering).
- */
-async function createProgram(
-  page: Page,
-  name: string,
-  description = ''
-): Promise<void> {
-  await page.goto('/programs');
-  await page.getByRole('button', { name: '+ New Program' }).click();
-
-  const dialog = page.getByRole('dialog', { name: 'New Program' });
-  await expect(dialog).toBeVisible();
-
-  await dialog.getByLabel('Program Name').fill(name);
-  if (description) {
-    await dialog.getByLabel('Description').fill(description);
-  }
-  await dialog.getByRole('button', { name: 'Create' }).click();
-  await expect(dialog).toBeHidden();
-  await expect(page.getByRole('row', { name })).toBeVisible();
 }
 
 /**

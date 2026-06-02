@@ -1,4 +1,7 @@
-import { test, expect, type Page, type Dialog } from '@playwright/test';
+import { test, expect } from '../fixtures/cleanup.fixture';
+import { clickCreateAndTrack } from './helpers/program';
+import { waitForProgramCreate } from '../lib/program-tracker';
+import type { Page, Dialog } from '@playwright/test';
 import { format } from 'date-fns';
 
 function requireEnv(name: string): string {
@@ -82,7 +85,7 @@ test.describe('DS-1 Create Program (Didaxis Studio)', () => {
     const dialog = await openNewProgramModal(page);
     await dialog.getByLabel('Program Name').fill(programName);
     await dialog.getByLabel('Description').fill(programDescription);
-    await dialog.getByRole('button', { name: 'Create' }).click();
+    await clickCreateAndTrack(page, dialog);
 
     await expect(dialog).toBeHidden();
 
@@ -98,7 +101,7 @@ test.describe('DS-1 Create Program (Didaxis Studio)', () => {
     const dialog = await openNewProgramModal(page);
     await dialog.getByLabel('Program Name').fill(programName);
     await dialog.getByLabel('Description').fill('I.G. smoke create');
-    await dialog.getByRole('button', { name: 'Create' }).click();
+    await clickCreateAndTrack(page, dialog);
 
     // Within ~2s, the dialog should be gone, and no second click is required.
     await expect(dialog).toBeHidden({ timeout: 2000 });
@@ -111,7 +114,7 @@ test.describe('DS-1 Create Program (Didaxis Studio)', () => {
     const dialog = await openNewProgramModal(page);
     await dialog.getByLabel('Program Name').fill(programName);
     await dialog.getByLabel('Description').fill('I.G. persisted across navigation');
-    await dialog.getByRole('button', { name: 'Create' }).click();
+    await clickCreateAndTrack(page, dialog);
 
     await expect(dialog).toBeHidden();
     await expect(page.getByRole('row', { name: programName })).toBeVisible();
@@ -133,7 +136,7 @@ test.describe('DS-1 Create Program (Didaxis Studio)', () => {
 
     // Per current product behavior, Create is enabled with a non-empty name only.
     await expect(createBtn).toBeEnabled();
-    await createBtn.click();
+    await clickCreateAndTrack(page, dialog);
 
     await expect(dialog).toBeHidden();
     await expect(page.getByRole('row', { name: programName })).toBeVisible();
@@ -232,7 +235,7 @@ test.describe('DS-1 Create Program (Didaxis Studio)', () => {
     const dialog = await openNewProgramModal(page);
     await dialog.getByLabel('Program Name').fill(programName);
     await dialog.getByLabel('Description').fill('I.G. max name');
-    await dialog.getByRole('button', { name: 'Create' }).click();
+    await clickCreateAndTrack(page, dialog);
 
     await expect(dialog).toBeHidden();
     await expect(page.getByRole('row', { name: programName })).toBeVisible();
@@ -244,7 +247,7 @@ test.describe('DS-1 Create Program (Didaxis Studio)', () => {
     const dialog = await openNewProgramModal(page);
     await dialog.getByLabel('Program Name').fill(programName);
     await dialog.getByLabel('Description').fill('I.G. special chars');
-    await dialog.getByRole('button', { name: 'Create' }).click();
+    await clickCreateAndTrack(page, dialog);
 
     await expect(dialog).toBeHidden();
     await expect(page.getByRole('row', { name: programName })).toBeVisible();
@@ -263,7 +266,7 @@ test.describe('DS-1 Create Program (Didaxis Studio)', () => {
     const dialog = await openNewProgramModal(page);
     await dialog.getByLabel('Program Name').fill(programName);
     await dialog.getByLabel('Description').fill('I.G. xss');
-    await dialog.getByRole('button', { name: 'Create' }).click();
+    await clickCreateAndTrack(page, dialog);
 
     await expect(dialog).toBeHidden();
     await expect(page.getByRole('row', { name: programName })).toBeVisible();
@@ -277,7 +280,7 @@ test.describe('DS-1 Create Program (Didaxis Studio)', () => {
     const firstDialog = await openNewProgramModal(page);
     await firstDialog.getByLabel('Program Name').fill(programName);
     await firstDialog.getByLabel('Description').fill('I.G. first');
-    await firstDialog.getByRole('button', { name: 'Create' }).click();
+    await clickCreateAndTrack(page, firstDialog);
     await expect(firstDialog).toBeHidden();
     await expect(page.getByRole('row', { name: programName })).toHaveCount(1);
 
@@ -304,7 +307,7 @@ test.describe('DS-1 Create Program (Didaxis Studio)', () => {
     const dialog = await openNewProgramModal(page);
     await dialog.getByLabel('Program Name').fill(programName);
     await dialog.getByLabel('Description').fill(longDescription);
-    await dialog.getByRole('button', { name: 'Create' }).click();
+    await clickCreateAndTrack(page, dialog);
 
     await expect(dialog).toBeHidden();
     await expect(page.getByRole('row', { name: programName })).toBeVisible();
@@ -326,7 +329,9 @@ test.describe('DS-1 Create Program (Didaxis Studio)', () => {
     await dialog.getByLabel('Description').fill('I.G. double click guard');
 
     const createBtn = dialog.getByRole('button', { name: 'Create' });
+    const idPromise = waitForProgramCreate(page);
     await Promise.all([createBtn.click(), createBtn.click({ force: true }).catch(() => {})]);
+    await idPromise;
 
     await expect(dialog).toBeHidden();
     await expect(page.getByRole('row', { name: programName })).toHaveCount(1);

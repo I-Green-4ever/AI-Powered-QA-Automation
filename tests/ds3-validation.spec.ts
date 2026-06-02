@@ -1,4 +1,6 @@
-import { test, expect, type Page, type Locator, type Dialog } from '@playwright/test';
+import { test, expect } from '../fixtures/cleanup.fixture';
+import { clickCreateAndTrack } from './helpers/program';
+import type { Page, Locator, Dialog } from '@playwright/test';
 import { format } from 'date-fns';
 
 function requireEnv(name: string): string {
@@ -59,7 +61,7 @@ async function createProgram(
   if (description) {
     await dialog.getByLabel('Description').fill(description);
   }
-  await dialog.getByRole('button', { name: 'Create' }).click();
+  await clickCreateAndTrack(page, dialog);
   await expect(dialog).toBeHidden();
   await expect(page.getByRole('row', { name })).toBeVisible();
 }
@@ -93,7 +95,7 @@ test.describe('DS-3 Program Name Validation & Duplicate Prevention (Didaxis Stud
     const dialog = await openNewProgramModal(page);
     await dialog.getByLabel('Program Name').fill(programName);
     await dialog.getByLabel('Description').fill(description);
-    await dialog.getByRole('button', { name: 'Create' }).click();
+    await clickCreateAndTrack(page, dialog);
 
     await expect(dialog).toBeHidden();
     const row = page.getByRole('row', { name: programName });
@@ -109,7 +111,7 @@ test.describe('DS-3 Program Name Validation & Duplicate Prevention (Didaxis Stud
     const dialog = await openNewProgramModal(page);
     await dialog.getByLabel('Program Name').fill(programName);
     await dialog.getByLabel('Description').fill('I.G. unicode positive');
-    await dialog.getByRole('button', { name: 'Create' }).click();
+    await clickCreateAndTrack(page, dialog);
 
     await expect(dialog).toBeHidden();
     await expect(page.getByText(programName, { exact: true })).toHaveCount(1);
@@ -126,7 +128,7 @@ test.describe('DS-3 Program Name Validation & Duplicate Prevention (Didaxis Stud
     const dialog = await openNewProgramModal(page);
     await dialog.getByLabel('Program Name').fill(paddedName);
     await dialog.getByLabel('Description').fill('I.G. trim');
-    await dialog.getByRole('button', { name: 'Create' }).click();
+    await clickCreateAndTrack(page, dialog);
 
     await expect(dialog).toBeHidden();
     // Row name is exactly the trimmed inner string — leading/trailing spaces stripped.
@@ -141,7 +143,7 @@ test.describe('DS-3 Program Name Validation & Duplicate Prevention (Didaxis Stud
     const dialog = await openNewProgramModal(page);
     await dialog.getByLabel('Program Name').fill(programName);
     await dialog.getByLabel('Description').fill('I.G. mixed');
-    await dialog.getByRole('button', { name: 'Create' }).click();
+    await clickCreateAndTrack(page, dialog);
 
     await expect(dialog).toBeHidden();
     await expect(page.getByText(programName, { exact: true })).toHaveCount(1);
@@ -314,7 +316,7 @@ test.describe('DS-3 Program Name Validation & Duplicate Prevention (Didaxis Stud
 
     // Fix the name and re-submit.
     await dialog.getByLabel('Program Name').fill(correctedName);
-    await dialog.getByRole('button', { name: 'Create' }).click();
+    await clickCreateAndTrack(page, dialog);
 
     await expect(dialog).toBeHidden();
     await expect(page.getByText(correctedName, { exact: true })).toHaveCount(1);
@@ -340,7 +342,7 @@ test.describe('DS-3 Program Name Validation & Duplicate Prevention (Didaxis Stud
     const dialog = await openNewProgramModal(page);
     await dialog.getByLabel('Program Name').fill(programName);
     await dialog.getByLabel('Description').fill('I.G. rtl');
-    await dialog.getByRole('button', { name: 'Create' }).click();
+    await clickCreateAndTrack(page, dialog);
 
     await expect(dialog).toBeHidden();
     await expect(page.getByText(programName, { exact: true })).toHaveCount(1);
@@ -356,7 +358,7 @@ test.describe('DS-3 Program Name Validation & Duplicate Prevention (Didaxis Stud
     const dialog = await openNewProgramModal(page);
     await dialog.getByLabel('Program Name').fill(programName);
     await dialog.getByLabel('Description').fill('I.G. emoji');
-    await dialog.getByRole('button', { name: 'Create' }).click();
+    await clickCreateAndTrack(page, dialog);
 
     await expect(dialog).toBeHidden();
     await expect(page.getByText(programName, { exact: true })).toHaveCount(1);
@@ -420,7 +422,7 @@ test.describe('DS-3 Program Name Validation & Duplicate Prevention (Didaxis Stud
     const dialog = await openNewProgramModal(page);
     await dialog.getByLabel('Program Name').fill(programName);
     await dialog.getByLabel('Description').fill('I.G. xss safety');
-    await dialog.getByRole('button', { name: 'Create' }).click();
+    await clickCreateAndTrack(page, dialog);
 
     await expect(dialog).toBeHidden();
     await expect(page.getByText(programName, { exact: true })).toHaveCount(1);
@@ -440,7 +442,7 @@ test.describe('DS-3 Program Name Validation & Duplicate Prevention (Didaxis Stud
     const dialog = await openNewProgramModal(page);
     await dialog.getByLabel('Program Name').fill(programName);
     await dialog.getByLabel('Description').fill('I.G. long-special');
-    await dialog.getByRole('button', { name: 'Create' }).click();
+    await clickCreateAndTrack(page, dialog);
 
     await expect(dialog).toBeHidden();
     await expect(page.getByText(programName, { exact: true })).toHaveCount(1);
