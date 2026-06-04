@@ -1,20 +1,10 @@
 import { test, expect } from '../fixtures/cleanup.fixture';
 import { createProgram } from './helpers/program';
-import type { Page, Locator, Dialog } from '@playwright/test';
+import { openEditModal } from './helpers/programs-ui';
+import { ProgramsPage } from '../pages/programs.page';
+import { AppShell } from '../pages/app-shell.page';
+import type { Dialog } from '@playwright/test';
 import { format } from 'date-fns';
-
-function requireEnv(name: string): string {
-  const value = process.env[name];
-  if (!value) {
-    throw new Error(
-      `Missing env var "${name}". Set it in the .env file at the project root.`
-    );
-  }
-  return value;
-}
-
-const DIDAXIS_EMAIL = requireEnv('DIDAXIS_EMAIL');
-const DIDAXIS_PASSWORD = requireEnv('DIDAXIS_PASSWORD');
 
 /**
  * Build a unique, human-readable suffix for test data so each run produces
@@ -32,39 +22,7 @@ function uniqueSuffix(): string {
   return `${format(now, 'dd/MMM/yyyy')} [${timeString}]`;
 }
 
-async function login(page: Page): Promise<void> {
-  await page.goto('/login');
-  await page.getByLabel('Email').fill(DIDAXIS_EMAIL);
-  await page.getByLabel('Password').fill(DIDAXIS_PASSWORD);
-  await page.getByRole('button', { name: 'Sign In' }).click();
-
-  // Wait for an authenticated landmark rather than just a URL change.
-  await expect(page.getByRole('button', { name: /Programs/ })).toBeVisible();
-}
-
-/**
- * Open the Edit Program modal for the row whose accessible name contains
- * `programName`. Returns the dialog locator scoped to the Edit modal.
- *
- * The edit control is a per-row "✏️" button (no aria-label or title is
- * exposed by Mantine, confirmed via Playwright MCP inspection).
- */
-async function openEditModal(page: Page, programName: string): Promise<Locator> {
-  await page.goto('/programs');
-  const row = page.getByRole('row', { name: programName });
-  await expect(row).toBeVisible();
-  await row.getByRole('button', { name: '✏️' }).click();
-
-  const dialog = page.getByRole('dialog', { name: 'Edit Program' });
-  await expect(dialog).toBeVisible();
-  return dialog;
-}
-
 test.describe('DS-2 Edit Program (Didaxis Studio)', () => {
-  test.beforeEach(async ({ page }) => {
-    await login(page);
-  });
-
   // ---------------------------------------------------------------------------
   // Positive flows
   // ---------------------------------------------------------------------------
@@ -73,11 +31,11 @@ test.describe('DS-2 Edit Program (Didaxis Studio)', () => {
     const programName = `I.G. Edit Open ${uniqueSuffix()}`;
     await createProgram(page, programName, 'I.G. open edit precondition');
 
-    const dialog = await openEditModal(page, programName);
+    const edit = await openEditModal(page, programName);
 
-    await expect(dialog.getByRole('heading', { name: 'Edit Program' })).toBeVisible();
-    await expect(dialog.getByRole('button', { name: 'Save' })).toBeVisible();
-    await expect(dialog.getByRole('button', { name: 'Cancel' })).toBeVisible();
+    await expect(edit.heading).toBeVisible();
+    await expect(edit.saveButton).toBeVisible();
+    await expect(edit.cancelButton).toBeVisible();
   });
 
   test('TC-002 - Edit form is pre-populated with the program current data (AC1)', async ({ page }) => {
@@ -85,50 +43,54 @@ test.describe('DS-2 Edit Program (Didaxis Studio)', () => {
     const description = 'I.G. prepopulated description';
     await createProgram(page, programName, description);
 
-    const dialog = await openEditModal(page, programName);
+    const edit = await openEditModal(page, programName);
 
-    await expect(dialog.getByLabel('Program Name')).toHaveValue(programName);
-    await expect(dialog.getByLabel('Description')).toHaveValue(description);
+    await expect(edit.programNameInput).toHaveValue(programName);
+    await expect(edit.descriptionInput).toHaveValue(description);
   });
 
   test('TC-003 - Editing the Name and saving updates the row in the list (AC2)', async ({ page }) => {
+    const programs = new ProgramsPage(page);
     const suffix = uniqueSuffix();
     const originalName = `I.G. Rename Source ${suffix}`;
     const newName = `I.G. Rename Target ${suffix}`;
     await createProgram(page, originalName, 'I.G. rename description');
 
-    const dialog = await openEditModal(page, originalName);
-    await dialog.getByLabel('Program Name').fill(newName);
-    await dialog.getByRole('button', { name: 'Save' }).click();
+    const edit = await openEditModal(page, originalName);
+    await edit.fillProgramName(newName);
+    await edit.clickSave();
 
-    await expect(dialog).toBeHidden();
-    await expect(page.getByRole('row', { name: newName })).toBeVisible();
+    await expect(edit.dialog).toBeHidden();
+    await expect(programs.row(newName)).toBeVisible();
     // The previous name must be gone — use exact text to avoid matching
     // unrelated rows that happen to share a substring.
-    await expect(page.getByText(originalName, { exact: true })).toHaveCount(0);
+    await expect(programs.exactText(originalName)).toHaveCount(0);
   });
 
   test('TC-004 - The save persists across navigation', async ({ page }) => {
+    const programs = new ProgramsPage(page);
+    const shell = new AppShell(page);
     const suffix = uniqueSuffix();
     const originalName = `I.G. Persist Source ${suffix}`;
     const newName = `I.G. Persist Target ${suffix}`;
     await createProgram(page, originalName, 'I.G. persist description');
 
-    const dialog = await openEditModal(page, originalName);
-    await dialog.getByLabel('Program Name').fill(newName);
-    await dialog.getByRole('button', { name: 'Save' }).click();
-    await expect(dialog).toBeHidden();
-    await expect(page.getByRole('row', { name: newName })).toBeVisible();
+    const edit = await openEditModal(page, originalName);
+    await edit.fillProgramName(newName);
+    await edit.clickSave();
+    await expect(edit.dialog).toBeHidden();
+    await expect(programs.row(newName)).toBeVisible();
 
     // Round-trip through Dashboard to force a re-fetch from the server.
-    await page.getByRole('button', { name: /Dashboard/ }).click();
-    await page.getByRole('button', { name: /Programs/ }).click();
+    await shell.goToDashboard();
+    await shell.goToPrograms();
 
-    await expect(page.getByRole('row', { name: newName })).toBeVisible();
-    await expect(page.getByText(originalName, { exact: true })).toHaveCount(0);
+    await expect(programs.row(newName)).toBeVisible();
+    await expect(programs.exactText(originalName)).toHaveCount(0);
   });
 
   test('TC-005 - Editing both Name and Description in one save updates both', async ({ page }) => {
+    const programs = new ProgramsPage(page);
     const suffix = uniqueSuffix();
     const originalName = `I.G. Edit Both ${suffix}`;
     const newName = `I.G. Edit Both ${suffix} Updated`;
@@ -144,56 +106,59 @@ test.describe('DS-2 Edit Program (Didaxis Studio)', () => {
       }
     });
 
-    const dialog = await openEditModal(page, originalName);
-    await dialog.getByLabel('Program Name').fill(newName);
-    await dialog.getByLabel('Description').fill(afterDescription);
-    await dialog.getByRole('button', { name: 'Save' }).click();
+    const edit = await openEditModal(page, originalName);
+    await edit.fillProgramName(newName);
+    await edit.fillDescription(afterDescription);
+    await edit.clickSave();
 
-    await expect(dialog).toBeHidden();
-    const row = page.getByRole('row', { name: newName });
+    await expect(edit.dialog).toBeHidden();
+    const row = programs.row(newName);
     await expect(row).toBeVisible();
     await expect(row).toContainText(afterDescription);
-    await expect(page.getByText(beforeDescription, { exact: true })).toHaveCount(0);
+    await expect(programs.exactText(beforeDescription)).toHaveCount(0);
     expect(patchCount).toBe(1);
   });
 
   test('TC-006 - Editing only the Description preserves the Name (AC3)', async ({ page }) => {
+    const programs = new ProgramsPage(page);
     const programName = `I.G. Desc Only ${uniqueSuffix()}`;
     const beforeDescription = 'I.G. before';
     const afterDescription = 'I.G. after';
     await createProgram(page, programName, beforeDescription);
 
-    const dialog = await openEditModal(page, programName);
+    const edit = await openEditModal(page, programName);
     // Leave Program Name untouched on purpose.
-    await dialog.getByLabel('Description').fill(afterDescription);
-    await dialog.getByRole('button', { name: 'Save' }).click();
+    await edit.fillDescription(afterDescription);
+    await edit.clickSave();
 
-    await expect(dialog).toBeHidden();
-    const row = page.getByRole('row', { name: programName });
+    await expect(edit.dialog).toBeHidden();
+    const row = programs.row(programName);
     await expect(row).toBeVisible();
     await expect(row).toContainText(afterDescription);
-    await expect(page.getByText(beforeDescription, { exact: true })).toHaveCount(0);
+    await expect(programs.exactText(beforeDescription)).toHaveCount(0);
   });
 
   test('TC-007 - Editing only the Name preserves the Description (AC3 mirror)', async ({ page }) => {
+    const programs = new ProgramsPage(page);
     const suffix = uniqueSuffix();
     const originalName = `I.G. Name Only Source ${suffix}`;
     const newName = `I.G. Name Only Target ${suffix}`;
     const description = 'keep me';
     await createProgram(page, originalName, description);
 
-    const dialog = await openEditModal(page, originalName);
-    await dialog.getByLabel('Program Name').fill(newName);
+    const edit = await openEditModal(page, originalName);
+    await edit.fillProgramName(newName);
     // Description left untouched on purpose.
-    await dialog.getByRole('button', { name: 'Save' }).click();
+    await edit.clickSave();
 
-    await expect(dialog).toBeHidden();
-    const row = page.getByRole('row', { name: newName });
+    await expect(edit.dialog).toBeHidden();
+    const row = programs.row(newName);
     await expect(row).toBeVisible();
     await expect(row).toContainText(description);
   });
 
   test('TC-008 - Re-opening edit after save shows the new values pre-populated', async ({ page }) => {
+    const programs = new ProgramsPage(page);
     const suffix = uniqueSuffix();
     const originalName = `I.G. Reopen Source ${suffix}`;
     const newName = `I.G. Reopen Target ${suffix}`;
@@ -201,17 +166,17 @@ test.describe('DS-2 Edit Program (Didaxis Studio)', () => {
     await createProgram(page, originalName, description);
 
     // First edit: rename.
-    let dialog = await openEditModal(page, originalName);
-    await dialog.getByLabel('Program Name').fill(newName);
-    await dialog.getByRole('button', { name: 'Save' }).click();
-    await expect(dialog).toBeHidden();
-    await expect(page.getByRole('row', { name: newName })).toBeVisible();
+    let edit = await openEditModal(page, originalName);
+    await edit.fillProgramName(newName);
+    await edit.clickSave();
+    await expect(edit.dialog).toBeHidden();
+    await expect(programs.row(newName)).toBeVisible();
 
     // Second edit: open again and confirm the persisted values are shown.
-    dialog = await openEditModal(page, newName);
-    await expect(dialog.getByLabel('Program Name')).toHaveValue(newName);
-    await expect(dialog.getByLabel('Description')).toHaveValue(description);
-    await expect(dialog.getByLabel('Program Name')).not.toHaveValue(originalName);
+    edit = await openEditModal(page, newName);
+    await expect(edit.programNameInput).toHaveValue(newName);
+    await expect(edit.descriptionInput).toHaveValue(description);
+    await expect(edit.programNameInput).not.toHaveValue(originalName);
   });
 
   // ---------------------------------------------------------------------------
@@ -222,52 +187,53 @@ test.describe('DS-2 Edit Program (Didaxis Studio)', () => {
     const programName = `I.G. Empty Name ${uniqueSuffix()}`;
     await createProgram(page, programName, 'I.G. empty name test');
 
-    const dialog = await openEditModal(page, programName);
-    const nameInput = dialog.getByLabel('Program Name');
-    const saveBtn = dialog.getByRole('button', { name: 'Save' });
+    const edit = await openEditModal(page, programName);
 
-    await nameInput.fill('');
-    await expect(saveBtn).toBeDisabled();
+    await edit.fillProgramName('');
+    await expect(edit.saveButton).toBeDisabled();
 
     // Pressing Enter while empty must not submit.
-    await nameInput.focus();
+    await edit.focusProgramName();
     await page.keyboard.press('Enter');
-    await expect(dialog).toBeVisible();
-    await expect(saveBtn).toBeDisabled();
+    await expect(edit.dialog).toBeVisible();
+    await expect(edit.saveButton).toBeDisabled();
   });
 
   test('TC-010 - Whitespace-only Program Name is treated as empty', async ({ page }) => {
+    const programs = new ProgramsPage(page);
     const programName = `I.G. Whitespace Name ${uniqueSuffix()}`;
     await createProgram(page, programName, 'I.G. whitespace name test');
 
-    const dialog = await openEditModal(page, programName);
-    await dialog.getByLabel('Program Name').fill('   ');
-    await expect(dialog.getByRole('button', { name: 'Save' })).toBeDisabled();
+    const edit = await openEditModal(page, programName);
+    await edit.fillProgramName('   ');
+    await expect(edit.saveButton).toBeDisabled();
 
     // A program literally named "   " must never appear in the list.
-    await expect(page.getByText('   ', { exact: true })).toHaveCount(0);
+    await expect(programs.exactText('   ')).toHaveCount(0);
   });
 
   test('TC-011 - Cancel discards in-progress edits', async ({ page }) => {
+    const programs = new ProgramsPage(page);
     const programName = `I.G. Cancel Discard ${uniqueSuffix()}`;
     const originalDescription = 'I.G. cancel description';
     await createProgram(page, programName, originalDescription);
 
-    let dialog = await openEditModal(page, programName);
-    await dialog.getByLabel('Program Name').fill(`I.G. DiscardMe ${uniqueSuffix()}`);
-    await dialog.getByRole('button', { name: 'Cancel' }).click();
+    let edit = await openEditModal(page, programName);
+    await edit.fillProgramName(`I.G. DiscardMe ${uniqueSuffix()}`);
+    await edit.clickCancel();
 
-    await expect(dialog).toBeHidden();
+    await expect(edit.dialog).toBeHidden();
     // Row name in the list must still be the original.
-    await expect(page.getByRole('row', { name: programName })).toBeVisible();
+    await expect(programs.row(programName)).toBeVisible();
 
     // Re-opening edit shows the previous (saved) values, not the abandoned draft.
-    dialog = await openEditModal(page, programName);
-    await expect(dialog.getByLabel('Program Name')).toHaveValue(programName);
-    await expect(dialog.getByLabel('Description')).toHaveValue(originalDescription);
+    edit = await openEditModal(page, programName);
+    await expect(edit.programNameInput).toHaveValue(programName);
+    await expect(edit.descriptionInput).toHaveValue(originalDescription);
   });
 
   test('TC-012 - Server failure on save (5xx) does not update the list', async ({ page }) => {
+    const programs = new ProgramsPage(page);
     const programName = `I.G. Save 500 ${uniqueSuffix()}`;
     const originalDescription = 'I.G. server-failure precondition';
     await createProgram(page, programName, originalDescription);
@@ -288,17 +254,17 @@ test.describe('DS-2 Edit Program (Didaxis Studio)', () => {
       await route.continue();
     });
 
-    const dialog = await openEditModal(page, programName);
-    await dialog.getByLabel('Program Name').fill(attemptedNewName);
-    await dialog.getByRole('button', { name: 'Save' }).click();
+    const edit = await openEditModal(page, programName);
+    await edit.fillProgramName(attemptedNewName);
+    await edit.clickSave();
 
     // Modal stays open with the user's edits intact.
-    await expect(dialog).toBeVisible();
-    await expect(dialog.getByLabel('Program Name')).toHaveValue(attemptedNewName);
+    await expect(edit.dialog).toBeVisible();
+    await expect(edit.programNameInput).toHaveValue(attemptedNewName);
 
     // Pre-edit values remain in the underlying list.
-    await expect(page.getByText(programName, { exact: true })).toHaveCount(1);
-    await expect(page.getByText(attemptedNewName, { exact: true })).toHaveCount(0);
+    await expect(programs.exactText(programName)).toHaveCount(1);
+    await expect(programs.exactText(attemptedNewName)).toHaveCount(0);
   });
 
   // Requires two concurrent admin sessions to delete then save — out of
@@ -319,34 +285,37 @@ test.describe('DS-2 Edit Program (Didaxis Studio)', () => {
   // ---------------------------------------------------------------------------
 
   test('TC-015 - Editing to a name length of 255 chars succeeds', async ({ page }) => {
+    const programs = new ProgramsPage(page);
     const programName = `I.G. LongName Target ${uniqueSuffix()}`;
     await createProgram(page, programName, 'I.G. long-name precondition');
 
     const longName = 'P'.repeat(255);
     expect(longName).toHaveLength(255);
 
-    const dialog = await openEditModal(page, programName);
-    await dialog.getByLabel('Program Name').fill(longName);
-    await dialog.getByRole('button', { name: 'Save' }).click();
+    const edit = await openEditModal(page, programName);
+    await edit.fillProgramName(longName);
+    await edit.clickSave();
 
-    await expect(dialog).toBeHidden();
-    await expect(page.getByText(longName, { exact: true })).toHaveCount(1);
+    await expect(edit.dialog).toBeHidden();
+    await expect(programs.exactText(longName)).toHaveCount(1);
   });
 
   test('TC-016 - Editing to special characters / Unicode preserves them exactly', async ({ page }) => {
+    const programs = new ProgramsPage(page);
     const programName = `I.G. Unicode Source ${uniqueSuffix()}`;
     await createProgram(page, programName, 'I.G. unicode precondition');
 
     const newName = `Renée's "Accelerated" Updated ${uniqueSuffix()}`;
-    const dialog = await openEditModal(page, programName);
-    await dialog.getByLabel('Program Name').fill(newName);
-    await dialog.getByRole('button', { name: 'Save' }).click();
+    const edit = await openEditModal(page, programName);
+    await edit.fillProgramName(newName);
+    await edit.clickSave();
 
-    await expect(dialog).toBeHidden();
-    await expect(page.getByText(newName, { exact: true })).toHaveCount(1);
+    await expect(edit.dialog).toBeHidden();
+    await expect(programs.exactText(newName)).toHaveCount(1);
   });
 
   test('TC-017 - Editing to HTML-like text does not execute as script (XSS)', async ({ page }) => {
+    const programs = new ProgramsPage(page);
     const programName = `I.G. XSS Source ${uniqueSuffix()}`;
     await createProgram(page, programName, 'I.G. xss precondition');
 
@@ -359,17 +328,17 @@ test.describe('DS-2 Edit Program (Didaxis Studio)', () => {
       void d.dismiss();
     });
 
-    let dialog = await openEditModal(page, programName);
-    await dialog.getByLabel('Program Name').fill(xssName);
-    await dialog.getByRole('button', { name: 'Save' }).click();
+    let edit = await openEditModal(page, programName);
+    await edit.fillProgramName(xssName);
+    await edit.clickSave();
 
-    await expect(dialog).toBeHidden();
-    await expect(page.getByText(xssName, { exact: true })).toHaveCount(1);
+    await expect(edit.dialog).toBeHidden();
+    await expect(programs.exactText(xssName)).toHaveCount(1);
     expect(nativeDialogs).toHaveLength(0);
 
     // Re-opening edit shows the same literal string.
-    dialog = await openEditModal(page, xssName);
-    await expect(dialog.getByLabel('Program Name')).toHaveValue(xssName);
+    edit = await openEditModal(page, xssName);
+    await expect(edit.programNameInput).toHaveValue(xssName);
   });
 
   // Reaching the "two rows sharing the same name" state requires a direct
@@ -381,41 +350,44 @@ test.describe('DS-2 Edit Program (Didaxis Studio)', () => {
   });
 
   test('TC-019 - Editing to a name that matches another program is rejected (DS-3 AC3)', async ({ page }) => {
+    const programs = new ProgramsPage(page);
     const suffix = uniqueSuffix();
     const nameA = `I.G. Existing A ${suffix}`;
     const nameB = `I.G. Existing B ${suffix}`;
     await createProgram(page, nameA, 'I.G. existing A description');
     await createProgram(page, nameB, 'I.G. existing B description');
 
-    const dialog = await openEditModal(page, nameB);
-    await dialog.getByLabel('Program Name').fill(nameA);
-    await dialog.getByRole('button', { name: 'Save' }).click();
+    const edit = await openEditModal(page, nameB);
+    await edit.fillProgramName(nameA);
+    await edit.clickSave();
 
     // Save is rejected: modal stays open with the entered (conflicting) value.
-    await expect(dialog).toBeVisible();
-    await expect(dialog.getByLabel('Program Name')).toHaveValue(nameA);
+    await expect(edit.dialog).toBeVisible();
+    await expect(edit.programNameInput).toHaveValue(nameA);
 
     // List still contains exactly one row of each original name; no rename took effect.
-    await expect(page.getByText(nameA, { exact: true })).toHaveCount(1);
-    await expect(page.getByText(nameB, { exact: true })).toHaveCount(1);
+    await expect(programs.exactText(nameA)).toHaveCount(1);
+    await expect(programs.exactText(nameB)).toHaveCount(1);
   });
 
   test('TC-020 - Saving with no changes is a no-op', async ({ page }) => {
+    const programs = new ProgramsPage(page);
     const programName = `I.G. Noop Save ${uniqueSuffix()}`;
     const description = 'I.G. noop description';
     await createProgram(page, programName, description);
 
-    const dialog = await openEditModal(page, programName);
+    const edit = await openEditModal(page, programName);
     // Change nothing.
-    await dialog.getByRole('button', { name: 'Save' }).click();
+    await edit.clickSave();
 
-    await expect(dialog).toBeHidden();
-    const row = page.getByRole('row', { name: programName });
+    await expect(edit.dialog).toBeHidden();
+    const row = programs.row(programName);
     await expect(row).toBeVisible();
     await expect(row).toContainText(description);
   });
 
   test('TC-021 - Rapid double-click on Save does not create duplicate updates', async ({ page }) => {
+    const programs = new ProgramsPage(page);
     const suffix = uniqueSuffix();
     const originalName = `I.G. DoubleSave Source ${suffix}`;
     const newName = `I.G. DoubleSave Target ${suffix}`;
@@ -431,37 +403,37 @@ test.describe('DS-2 Edit Program (Didaxis Studio)', () => {
       await route.continue();
     });
 
-    const dialog = await openEditModal(page, originalName);
-    await dialog.getByLabel('Program Name').fill(newName);
-    const saveBtn = dialog.getByRole('button', { name: 'Save' });
+    const edit = await openEditModal(page, originalName);
+    await edit.fillProgramName(newName);
 
     await Promise.all([
-      saveBtn.click(),
-      saveBtn.click({ force: true }).catch(() => {}),
+      edit.saveButton.click(),
+      edit.saveButton.click({ force: true }).catch(() => {}),
     ]);
 
-    await expect(dialog).toBeHidden();
-    await expect(page.getByText(newName, { exact: true })).toHaveCount(1);
-    await expect(page.getByText(originalName, { exact: true })).toHaveCount(0);
+    await expect(edit.dialog).toBeHidden();
+    await expect(programs.exactText(newName)).toHaveCount(1);
+    await expect(programs.exactText(originalName)).toHaveCount(0);
     // Either the button was disabled in-flight, or the second click was de-duped.
     expect(patchCount).toBe(1);
   });
 
   test('TC-022 - Pressing Esc while editing focused on a field discards changes', async ({ page }) => {
+    const programs = new ProgramsPage(page);
     const programName = `I.G. Esc Discard ${uniqueSuffix()}`;
     const originalDescription = 'I.G. esc precondition';
     await createProgram(page, programName, originalDescription);
 
-    let dialog = await openEditModal(page, programName);
-    await dialog.getByLabel('Program Name').fill(`I.G. EscDraft ${uniqueSuffix()}`);
+    let edit = await openEditModal(page, programName);
+    await edit.fillProgramName(`I.G. EscDraft ${uniqueSuffix()}`);
     await page.keyboard.press('Escape');
 
-    await expect(dialog).toBeHidden();
-    await expect(page.getByRole('row', { name: programName })).toBeVisible();
+    await expect(edit.dialog).toBeHidden();
+    await expect(programs.row(programName)).toBeVisible();
 
     // Re-opening edit shows the original (pre-discard) values.
-    dialog = await openEditModal(page, programName);
-    await expect(dialog.getByLabel('Program Name')).toHaveValue(programName);
-    await expect(dialog.getByLabel('Description')).toHaveValue(originalDescription);
+    edit = await openEditModal(page, programName);
+    await expect(edit.programNameInput).toHaveValue(programName);
+    await expect(edit.descriptionInput).toHaveValue(originalDescription);
   });
 });

@@ -1,5 +1,6 @@
-import { resetTrackedPrograms } from './lib/program-tracker';
+import { startExecution } from './lib/program-tracker';
 
 export default async function globalSetup(): Promise<void> {
-  resetTrackedPrograms();
+  const manifest = startExecution();
+  console.log(`[program-cleanup] Execution started: ${manifest.runId}`);
 }

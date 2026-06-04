@@ -1,14 +1,15 @@
-import type { Page, Locator } from '@playwright/test';
-import { expect } from '@playwright/test';
+import { expect, type Page } from '@playwright/test';
 import { waitForProgramCreate } from '../../lib/program-tracker';
+import { ProgramsPage } from '../../pages/programs.page';
+import type { NewProgramModal } from '../../pages/components/new-program.modal';
 
 /** Click Create and track the new program UUID from POST /api/programs. */
 export async function clickCreateAndTrack(
   page: Page,
-  dialog: Locator
+  modal: NewProgramModal
 ): Promise<string> {
   const idPromise = waitForProgramCreate(page);
-  await dialog.getByRole('button', { name: 'Create' }).click();
+  await modal.clickCreate();
   return idPromise;
 }
 
@@ -18,19 +19,18 @@ export async function createProgram(
   name: string,
   description = ''
 ): Promise<string> {
-  await page.goto('/programs');
-  await page.getByRole('button', { name: '+ New Program' }).click();
+  const programs = new ProgramsPage(page);
+  await programs.goto();
+  const modal = await programs.openNewProgram();
+  await expect(modal.dialog).toBeVisible();
 
-  const dialog = page.getByRole('dialog', { name: 'New Program' });
-  await expect(dialog).toBeVisible();
-
-  await dialog.getByLabel('Program Name').fill(name);
+  await modal.fillProgramName(name);
   if (description) {
-    await dialog.getByLabel('Description').fill(description);
+    await modal.fillDescription(description);
   }
 
-  const id = await clickCreateAndTrack(page, dialog);
-  await expect(dialog).toBeHidden();
-  await expect(page.getByRole('row', { name })).toBeVisible();
+  const id = await clickCreateAndTrack(page, modal);
+  await expect(modal.dialog).toBeHidden();
+  await expect(programs.row(name)).toBeVisible();
   return id;
 }

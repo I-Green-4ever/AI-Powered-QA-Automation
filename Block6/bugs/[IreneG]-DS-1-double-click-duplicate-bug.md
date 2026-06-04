@@ -5,7 +5,9 @@
 **Type:** Bug  
 **Severity:** Medium  
 **Priority:** Medium  
-**Status:** Duplicate — commented on existing ticket **DS-92** (also related: DS-79)
+**Status:** Duplicate — commented on existing ticket **DS-92** (reconfirmed 2026-06-02; also related: DS-79)
+
+**Jira:** https://legionqaschool.atlassian.net/browse/DS-92
 
 **Steps to Reproduce:**
 1. Log in as admin at https://test.didaxis.studio/login

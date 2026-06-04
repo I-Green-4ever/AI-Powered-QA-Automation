@@ -1,20 +1,11 @@
 import { test, expect } from '../fixtures/cleanup.fixture';
 import { clickCreateAndTrack, createProgram } from './helpers/program';
-import type { Page, Locator, Dialog } from '@playwright/test';
+import { openEditModal } from './helpers/programs-ui';
+import { ProgramsPage } from '../pages/programs.page';
+import { AppShell } from '../pages/app-shell.page';
+import { LoginPage } from '../pages/login.page';
+import type { Dialog } from '@playwright/test';
 import { format } from 'date-fns';
-
-function requireEnv(name: string): string {
-  const value = process.env[name];
-  if (!value) {
-    throw new Error(
-      `Missing env var "${name}". Set it in the .env file at the project root.`
-    );
-  }
-  return value;
-}
-
-const DIDAXIS_EMAIL = requireEnv('DIDAXIS_EMAIL');
-const DIDAXIS_PASSWORD = requireEnv('DIDAXIS_PASSWORD');
 
 /**
  * Build a unique, human-readable suffix for test data so each run produces
@@ -32,51 +23,25 @@ function uniqueSuffix(): string {
   return `${format(now, 'dd/MMM/yyyy')} [${timeString}]`;
 }
 
-async function login(page: Page): Promise<void> {
-  await page.goto('/login');
-  await page.getByLabel('Email').fill(DIDAXIS_EMAIL);
-  await page.getByLabel('Password').fill(DIDAXIS_PASSWORD);
-  await page.getByRole('button', { name: 'Sign In' }).click();
-  await expect(page.getByRole('button', { name: /Programs/ })).toBeVisible();
-}
-
-function programRow(page: Page, programName: string): Locator {
-  return page.getByRole('row', { name: programName });
-}
-
-/**
- * Data rows in the programs grid (excludes the header row). Each data row
- * has both an edit (✏️) and delete (🗑) control per Playwright MCP inspection.
- */
-function programDataRows(page: Page): Locator {
-  return page
-    .getByRole('row')
-    .filter({ has: page.getByRole('button', { name: '🗑' }) });
-}
-
 // ============================================================================
-// Authenticated suite — login in beforeEach
+// Authenticated suite — session from storageState (auth.setup.ts)
 // ============================================================================
 
 test.describe('DS-5 Program List & Display (Didaxis Studio)', () => {
-  test.beforeEach(async ({ page }) => {
-    await login(page);
-  });
-
   // ---------------------------------------------------------------------------
   // Positive flows
   // ---------------------------------------------------------------------------
 
   test('TC-001 - Programs page renders a list with name and description (AC1 verbatim)', async ({ page }) => {
-    // Ensure at least one program exists so AC1 is exercisable.
+    const programs = new ProgramsPage(page);
     const programName = `I.G. Display AC1 ${uniqueSuffix()}`;
     const description = 'I.G. display ac1 description';
     await createProgram(page, programName, description);
 
-    await page.goto('/programs');
-    await expect(page.getByRole('heading', { name: 'Programs' })).toBeVisible();
+    await programs.goto();
+    await expect(programs.heading).toBeVisible();
 
-    const row = programRow(page, programName);
+    const row = programs.row(programName);
     await expect(row).toBeVisible();
     // Both name AND description must be present in the row.
     await expect(row).toContainText(programName);
@@ -84,6 +49,7 @@ test.describe('DS-5 Program List & Display (Didaxis Studio)', () => {
   });
 
   test('TC-002 - A program created in the same session appears in the list (cross-cuts DS-1)', async ({ page }) => {
+    const programs = new ProgramsPage(page);
     const programName = `I.G. Display Smoke ${uniqueSuffix()}`;
     const description = 'I.G. desc smoke';
 
@@ -91,39 +57,42 @@ test.describe('DS-5 Program List & Display (Didaxis Studio)', () => {
     // which is the contract under test for TC-002.
     await createProgram(page, programName, description);
 
-    const row = programRow(page, programName);
+    const row = programs.row(programName);
     await expect(row).toBeVisible();
     await expect(row).toContainText(description);
   });
 
   test('TC-003 - Multiple programs render side-by-side without overlap', async ({ page }) => {
+    const programs = new ProgramsPage(page);
     const suffix = uniqueSuffix();
-    const programs = [
+    const programList = [
       { name: `I.G. Multi A ${suffix}`, description: 'I.G. multi A desc' },
       { name: `I.G. Multi B ${suffix}`, description: 'I.G. multi B desc' },
       { name: `I.G. Multi C ${suffix}`, description: 'I.G. multi C desc' },
     ];
 
-    for (const p of programs) {
+    for (const p of programList) {
       await createProgram(page, p.name, p.description);
     }
 
-    await page.goto('/programs');
+    await programs.goto();
 
-    for (const p of programs) {
-      const row = programRow(page, p.name);
+    for (const p of programList) {
+      const row = programs.row(p.name);
       await expect(row).toBeVisible();
       await expect(row).toContainText(p.name);
       await expect(row).toContainText(p.description);
     }
 
     // None of the descriptions should leak into a sibling row.
-    const rowB = programRow(page, programs[1].name);
-    await expect(rowB).not.toContainText(programs[0].description);
-    await expect(rowB).not.toContainText(programs[2].description);
+    const rowB = programs.row(programList[1].name);
+    await expect(rowB).not.toContainText(programList[0].description);
+    await expect(rowB).not.toContainText(programList[2].description);
   });
 
   test('TC-004 - Empty state shows a "no programs yet" message and a create prompt (AC2 verbatim)', async ({ page }) => {
+    const programs = new ProgramsPage(page);
+
     // Force the list endpoint to return zero programs so we can drive the
     // empty-state UI without depending on tenant data.
     await page.route('**/api/programs', async (route) => {
@@ -138,25 +107,22 @@ test.describe('DS-5 Program List & Display (Didaxis Studio)', () => {
       await route.continue();
     });
 
-    await page.goto('/programs');
-    await expect(page.getByRole('heading', { name: 'Programs' })).toBeVisible();
+    await programs.goto();
+    await expect(programs.heading).toBeVisible();
 
     // No data rows are rendered.
-    await expect(programDataRows(page)).toHaveCount(0);
+    await expect(programs.dataRows).toHaveCount(0);
 
     // (a) Some "no programs" message exists. Exact copy is product-specific
     // per plan ambiguity #4, so match loosely.
-    await expect(
-      page.getByText(/no programs|create your first|get started/i)
-    ).toBeVisible();
+    await expect(programs.emptyStateHint).toBeVisible();
 
     // (b) Some create affordance is reachable from this state.
-    await expect(
-      page.getByRole('button', { name: /\+ ?New Program|Create Program|Create program/ })
-    ).toBeVisible();
+    await expect(programs.newProgramButtonAlt).toBeVisible();
   });
 
   test('TC-005 - Deleting the last program triggers the empty state (cross-cuts DS-4)', async ({ page }) => {
+    const programs = new ProgramsPage(page);
     const programName = `I.G. Solo ${uniqueSuffix()}`;
     const programId = `mock-solo-${Date.now()}`;
     const description = 'I.G. solo precondition';
@@ -188,21 +154,20 @@ test.describe('DS-5 Program List & Display (Didaxis Studio)', () => {
       await route.continue();
     });
 
-    await page.goto('/programs');
-    const row = programRow(page, programName);
-    await expect(row).toBeVisible();
+    await programs.goto();
+    const row = programs.programRow(programName);
+    await expect(row.row).toBeVisible();
 
-    page.once('dialog', (d) => void d.accept());
-    await row.getByRole('button', { name: '🗑' }).click();
+    await row.clickDeleteAccept();
 
     // Transition: row gone, empty-state visible without manual refresh.
-    await expect(programDataRows(page)).toHaveCount(0);
-    await expect(
-      page.getByText(/no programs|create your first|get started/i)
-    ).toBeVisible();
+    await expect(programs.dataRows).toHaveCount(0);
+    await expect(programs.emptyStateHint).toBeVisible();
   });
 
   test('TC-006 - Creating the first program from the empty state replaces the empty state with the list', async ({ page }) => {
+    const programs = new ProgramsPage(page);
+
     // Start in mocked empty state.
     await page.route('**/api/programs', async (route) => {
       if (route.request().method() === 'GET') {
@@ -216,22 +181,19 @@ test.describe('DS-5 Program List & Display (Didaxis Studio)', () => {
       await route.continue();
     });
 
-    await page.goto('/programs');
-    await expect(programDataRows(page)).toHaveCount(0);
+    await programs.goto();
+    await expect(programs.dataRows).toHaveCount(0);
 
     // Click the create CTA reachable from the empty state.
-    await page
-      .getByRole('button', { name: /\+ ?New Program|Create Program|Create program/ })
-      .first()
-      .click();
+    await programs.newProgramButtonAlt.first().click({ force: true });
 
-    const dialog = page.getByRole('dialog', { name: 'New Program' });
-    await expect(dialog).toBeVisible();
+    const modal = programs.newProgram;
+    await expect(modal.dialog).toBeVisible();
 
     const programName = `I.G. First ${uniqueSuffix()}`;
     const description = 'I.G. desc';
-    await dialog.getByLabel('Program Name').fill(programName);
-    await dialog.getByLabel('Description').fill(description);
+    await modal.fillProgramName(programName);
+    await modal.fillDescription(description);
 
     // Let the POST hit the real backend; mock the post-create GET so the
     // refreshed list shows exactly the row we just created.
@@ -250,17 +212,15 @@ test.describe('DS-5 Program List & Display (Didaxis Studio)', () => {
       await route.continue();
     });
 
-    await clickCreateAndTrack(page, dialog);
-    await expect(dialog).toBeHidden();
+    await clickCreateAndTrack(page, modal);
+    await expect(modal.dialog).toBeHidden();
 
     // Empty state gone; the new (only) row is rendered.
-    await expect(
-      page.getByText(/no programs|create your first|get started/i)
-    ).toHaveCount(0);
-    const row = programRow(page, programName);
+    await expect(programs.emptyStateHint).toHaveCount(0);
+    const row = programs.row(programName);
     await expect(row).toBeVisible();
     await expect(row).toContainText(description);
-    await expect(programDataRows(page)).toHaveCount(1);
+    await expect(programs.dataRows).toHaveCount(1);
   });
 
   // ---------------------------------------------------------------------------
@@ -268,6 +228,8 @@ test.describe('DS-5 Program List & Display (Didaxis Studio)', () => {
   // ---------------------------------------------------------------------------
 
   test('TC-007 - Server failure (5xx) when loading the list shows an error state, not empty', async ({ page }) => {
+    const programs = new ProgramsPage(page);
+
     await page.route('**/api/programs', async (route) => {
       if (route.request().method() === 'GET') {
         await route.fulfill({
@@ -280,23 +242,21 @@ test.describe('DS-5 Program List & Display (Didaxis Studio)', () => {
       await route.continue();
     });
 
-    await page.goto('/programs');
-    await expect(page.getByRole('heading', { name: 'Programs' })).toBeVisible();
+    await programs.goto();
+    await expect(programs.heading).toBeVisible();
 
     // No data rows under a 5xx.
-    await expect(programDataRows(page)).toHaveCount(0);
+    await expect(programs.dataRows).toHaveCount(0);
     // Must NOT be misrepresented as "no programs yet".
-    await expect(
-      page.getByText(/no programs|create your first/i)
-    ).toHaveCount(0);
+    await expect(programs.emptyStateHint).toHaveCount(0);
     // Some error indication is visible (exact copy is product-specific per
     // plan ambiguity #7 — match loosely).
-    await expect(
-      page.getByText(/error|failed|something went wrong|try again/i)
-    ).toBeVisible();
+    await expect(programs.errorHint).toBeVisible();
   });
 
   test('TC-008 - Slow / pending request shows a clear loading state, not a flash of empty state', async ({ page }) => {
+    const programs = new ProgramsPage(page);
+
     // Hold the response open for ~2s so we can observe the loading state.
     await page.route('**/api/programs', async (route) => {
       if (route.request().method() === 'GET') {
@@ -307,25 +267,23 @@ test.describe('DS-5 Program List & Display (Didaxis Studio)', () => {
       await route.continue();
     });
 
-    const navigation = page.goto('/programs');
+    const navigation = programs.goto();
 
     // While the request is pending, the empty-state must NOT be visible.
-    await expect(page.getByRole('heading', { name: 'Programs' })).toBeVisible();
-    await expect(
-      page.getByText(/no programs|create your first/i)
-    ).toHaveCount(0);
+    await expect(programs.heading).toBeVisible();
+    await expect(programs.emptyStateHint).toHaveCount(0);
 
     await navigation;
 
     // After the response arrives, the table is visible (rows >= 0).
-    await expect(page.getByRole('table')).toBeVisible();
+    await expect(programs.table).toBeVisible();
   });
 
   // No non-admin credentials in .env. Re-enable once
   // DIDAXIS_VIEWER_EMAIL / DIDAXIS_VIEWER_PASSWORD are provisioned.
   test.skip('TC-009 - Non-admin user sees the appropriate restricted view', async () => {
     // With viewer creds: navigate to /programs. Expect read-only list (no
-    // ✏️ / 🗑 / + New Program) OR 403 / redirect.
+    // edit/delete / + New Program) OR 403 / redirect.
   });
 
   // ---------------------------------------------------------------------------
@@ -333,6 +291,8 @@ test.describe('DS-5 Program List & Display (Didaxis Studio)', () => {
   // ---------------------------------------------------------------------------
 
   test('TC-011 - Long names and descriptions are truncated or wrapped without breaking layout', async ({ page }) => {
+    const programs = new ProgramsPage(page);
+
     // (a) 255-char name (per DS-1 TC-011) + (b) 1000-char description (per DS-1 TC-015).
     const suffix = uniqueSuffix();
     const longName = `I.G. ${'P'.repeat(250)}`;
@@ -344,38 +304,37 @@ test.describe('DS-5 Program List & Display (Didaxis Studio)', () => {
     await createProgram(page, longName, 'I.G. long-name short-desc');
     await createProgram(page, longDescName, longDescription);
 
-    await page.goto('/programs');
+    await programs.goto();
 
     // Both rows fit in the layout — table is visible and not clipped to nothing.
-    const longNameRow = programRow(page, longName);
-    const longDescRow = programRow(page, longDescName);
-    await expect(longNameRow).toBeVisible();
-    await expect(longDescRow).toBeVisible();
+    const longNameRow = programs.programRow(longName);
+    const longDescRow = programs.programRow(longDescName);
+    await expect(longNameRow.row).toBeVisible();
+    await expect(longDescRow.row).toBeVisible();
 
     // Per-row edit/delete affordances remain operable (not hidden by long text).
-    await expect(longNameRow.getByRole('button', { name: '✏️' })).toBeVisible();
-    await expect(longNameRow.getByRole('button', { name: '🗑' })).toBeVisible();
-    await expect(longDescRow.getByRole('button', { name: '✏️' })).toBeVisible();
-    await expect(longDescRow.getByRole('button', { name: '🗑' })).toBeVisible();
+    await expect(longNameRow.editButton).toBeVisible();
+    await expect(longNameRow.deleteButton).toBeVisible();
+    await expect(longDescRow.editButton).toBeVisible();
+    await expect(longDescRow.deleteButton).toBeVisible();
 
     // No row's rendered box exceeds the table's clientWidth — sanity check
     // against horizontal overflow.
-    const overflow = await page.evaluate(() => {
-      const table = document.querySelector('table');
-      if (!table) return false;
+    const overflow = await programs.table.evaluate((table) => {
       return table.scrollWidth > table.clientWidth + 1;
     });
     expect(overflow).toBe(false);
   });
 
   test('TC-012 - Unicode and special characters render correctly in name and description', async ({ page }) => {
+    const programs = new ProgramsPage(page);
     const programName = `I.G. Renée's "Accelerated" Program ${uniqueSuffix()}`;
     const description = 'I.G. Café & React <2026>';
 
     await createProgram(page, programName, description);
-    await page.goto('/programs');
+    await programs.goto();
 
-    const row = programRow(page, programName);
+    const row = programs.row(programName);
     await expect(row).toBeVisible();
     await expect(row).toContainText(programName);
     await expect(row).toContainText(description);
@@ -387,6 +346,7 @@ test.describe('DS-5 Program List & Display (Didaxis Studio)', () => {
   });
 
   test('TC-013 - HTML-like text in name or description is rendered as plain text in the list (no XSS)', async ({ page }) => {
+    const programs = new ProgramsPage(page);
     const suffix = uniqueSuffix();
     const programName = `I.G. <img src=x onerror=alert(1)> ${suffix}`;
     const description = `<script>alert(2)</script> I.G. xss list ${suffix}`;
@@ -399,9 +359,9 @@ test.describe('DS-5 Program List & Display (Didaxis Studio)', () => {
     });
 
     await createProgram(page, programName, description);
-    await page.goto('/programs');
+    await programs.goto();
 
-    const row = programRow(page, programName);
+    const row = programs.row(programName);
     await expect(row).toBeVisible();
     await expect(row).toContainText(programName);
     await expect(row).toContainText(description);
@@ -418,51 +378,48 @@ test.describe('DS-5 Program List & Display (Didaxis Studio)', () => {
   });
 
   test('TC-014 - Programs with empty description display gracefully', async ({ page }) => {
+    const programs = new ProgramsPage(page);
     const programName = `I.G. NoDesc ${uniqueSuffix()}`;
     // DS-1 TC-005 confirmed Create is enabled with a name only — leverage that.
     await createProgram(page, programName /* no description */);
 
-    await page.goto('/programs');
-    const row = programRow(page, programName);
-    await expect(row).toBeVisible();
-    await expect(row).toContainText(programName);
+    await programs.goto();
+    const row = programs.programRow(programName);
+    await expect(row.row).toBeVisible();
+    await expect(row.row).toContainText(programName);
 
     // Row remains operable: edit / delete still work.
-    await expect(row.getByRole('button', { name: '✏️' })).toBeVisible();
-    await expect(row.getByRole('button', { name: '🗑' })).toBeVisible();
+    await expect(row.editButton).toBeVisible();
+    await expect(row.deleteButton).toBeVisible();
   });
 
   test('TC-015 - An edit reflects in the list immediately (cross-cuts DS-2 AC2)', async ({ page }) => {
+    const programs = new ProgramsPage(page);
     const suffix = uniqueSuffix();
     const originalName = `I.G. To Rename ${suffix}`;
     const newName = `I.G. To Rename ${suffix} - Updated`;
     await createProgram(page, originalName, 'I.G. list edit precondition');
 
-    // Open the edit modal on the row.
-    await page.goto('/programs');
-    const row = programRow(page, originalName);
-    await row.getByRole('button', { name: '✏️' }).click();
-    const editDialog = page.getByRole('dialog', { name: 'Edit Program' });
-    await expect(editDialog).toBeVisible();
-    await editDialog.getByLabel('Program Name').fill(newName);
-    await editDialog.getByRole('button', { name: 'Save' }).click();
-    await expect(editDialog).toBeHidden();
+    const edit = await openEditModal(page, originalName);
+    await edit.fillProgramName(newName);
+    await edit.clickSave();
+    await expect(edit.dialog).toBeHidden();
 
     // Restated from the list's perspective: new row visible, old name gone.
-    await expect(programRow(page, newName)).toBeVisible();
-    await expect(page.getByText(originalName, { exact: true })).toHaveCount(0);
+    await expect(programs.row(newName)).toBeVisible();
+    await expect(programs.exactText(originalName)).toHaveCount(0);
   });
 
   test('TC-016 - A delete removes the row from the list immediately (cross-cuts DS-4 AC1)', async ({ page }) => {
+    const programs = new ProgramsPage(page);
     const programName = `I.G. To Delete ${uniqueSuffix()}`;
     await createProgram(page, programName, 'I.G. list delete precondition');
 
-    await page.goto('/programs');
-    page.once('dialog', (d) => void d.accept());
-    await programRow(page, programName).getByRole('button', { name: '🗑' }).click();
+    await programs.goto();
+    await programs.programRow(programName).clickDeleteAccept();
 
     // Row disappears without a manual refresh — no ghost row.
-    await expect(programRow(page, programName)).toHaveCount(0);
+    await expect(programs.row(programName)).toHaveCount(0);
   });
 
   // 50+ rows requires either a massive UI-driven seed or direct DB seeding;
@@ -473,6 +430,7 @@ test.describe('DS-5 Program List & Display (Didaxis Studio)', () => {
   });
 
   test('TC-018 - List ordering is consistent across reloads', async ({ page }) => {
+    const programs = new ProgramsPage(page);
     const suffix = uniqueSuffix();
     const names = [
       `I.G. Order A ${suffix}`,
@@ -484,8 +442,11 @@ test.describe('DS-5 Program List & Display (Didaxis Studio)', () => {
     }
 
     const captureOrder = async () => {
-      await page.goto('/programs');
-      const all = await programDataRows(page).allInnerTexts();
+      await programs.goto();
+      for (const n of names) {
+        await expect(programs.row(n)).toBeVisible();
+      }
+      const all = await programs.dataRows.allInnerTexts();
       return all
         .map((t) => names.find((n) => t.includes(n)))
         .filter((n): n is string => Boolean(n));
@@ -509,21 +470,22 @@ test.describe('DS-5 Program List & Display (Didaxis Studio)', () => {
   });
 
   test('TC-020 - List does not include a deleted program', async ({ page }) => {
+    const programs = new ProgramsPage(page);
+    const shell = new AppShell(page);
     const programName = `I.G. Deleted ${uniqueSuffix()}`;
     await createProgram(page, programName, 'I.G. soft-delete check');
 
-    await page.goto('/programs');
-    page.once('dialog', (d) => void d.accept());
-    await programRow(page, programName).getByRole('button', { name: '🗑' }).click();
-    await expect(programRow(page, programName)).toHaveCount(0);
+    await programs.goto();
+    await programs.programRow(programName).clickDeleteAccept();
+    await expect(programs.row(programName)).toHaveCount(0);
 
     // Round-trip away and back to force a re-fetch — the deleted name must
     // not reappear (display is over active programs only).
-    await page.getByRole('button', { name: /Dashboard/ }).click();
-    await page.getByRole('button', { name: /Programs/ }).click();
+    await shell.goToDashboard();
+    await shell.goToPrograms();
 
-    await expect(programRow(page, programName)).toHaveCount(0);
-    await expect(page.getByText(programName, { exact: true })).toHaveCount(0);
+    await expect(programs.row(programName)).toHaveCount(0);
+    await expect(programs.exactText(programName)).toHaveCount(0);
   });
 });
 
@@ -533,16 +495,22 @@ test.describe('DS-5 Program List & Display (Didaxis Studio)', () => {
 
 test.describe('DS-5 Program List & Display — unauthenticated', () => {
   test('TC-010 - Unauthenticated access to /programs redirects to login', async ({ page, context }) => {
-    // Guarantee a clean session.
-    await context.clearCookies();
+    const programs = new ProgramsPage(page);
+    const login = new LoginPage(page);
 
-    await page.goto('/programs');
+    // Override storageState from the chromium project for this test only.
+    await context.clearCookies();
+    await page.goto('/');
+    await page.evaluate(() => {
+      localStorage.clear();
+      sessionStorage.clear();
+    });
+
+    await programs.goto();
 
     // Either the URL was rewritten to /login, or the Sign In form is shown
     // in-place (the empty state must NOT be shown to an anonymous user).
-    await expect(page.getByRole('button', { name: 'Sign In' })).toBeVisible();
-    await expect(
-      page.getByText(/no programs|create your first/i)
-    ).toHaveCount(0);
+    await expect(login.signInButton).toBeVisible();
+    await expect(programs.emptyStateHint).toHaveCount(0);
   });
 });

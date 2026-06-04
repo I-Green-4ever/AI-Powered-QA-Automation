@@ -13,7 +13,7 @@ export type ProgramSummary = {
   name: string;
 };
 
-export type DeleteMode = 'all' | 'tracked' | 'ids';
+export type DeleteMode = 'all' | 'tracked' | 'ids' | 'execution';
 
 export type DeleteResult = {
   deleted: number;
@@ -121,16 +121,23 @@ export async function deletePrograms(options: {
 }): Promise<{ programs: ProgramSummary[]; result?: DeleteResult }> {
   const { mode, ids = [], dryRun = false } = options;
 
-  if (mode === 'tracked') {
+  if (mode === 'tracked' || mode === 'execution') {
     const trackedIds = readTrackedProgramIds();
     if (trackedIds.length === 0) {
-      console.log('[program-cleanup] No tracked programs to delete.');
+      console.log(
+        '[program-cleanup] No programs tracked for the current execution.'
+      );
       return { programs: [] };
     }
 
-    const programs = trackedIds.map((id) => ({ id, name: '(tracked)' }));
+    const programs = trackedIds.map((id) => ({ id, name: '(this execution)' }));
     if (dryRun) {
-      console.log(`[program-cleanup] Dry run: would delete ${programs.length} tracked program(s).`);
+      console.log(
+        `[program-cleanup] Dry run: would delete ${programs.length} program(s) from this execution.`
+      );
+      for (const p of programs) {
+        console.log(`  - ${p.id}`);
+      }
       return { programs };
     }
 
@@ -139,6 +146,10 @@ export async function deletePrograms(options: {
       programs,
       result: { deleted: programs.length, alreadyGone: 0, failed: 0, failures: [] },
     };
+  }
+
+  if (mode === 'all') {
+    requireDeleteAllConfirmation();
   }
 
   const programs =
@@ -178,13 +189,23 @@ export async function deletePrograms(options: {
   return { programs, result };
 }
 
+function requireDeleteAllConfirmation(): void {
+  const v = process.env.CONFIRM_DELETE_ALL_PROGRAMS?.toLowerCase();
+  if (v === '1' || v === 'true' || v === 'yes') return;
+  throw new Error(
+    '--all deletes every program visible to your API token (entire test environment). ' +
+      'Use --tracked to delete only programs from your last Playwright execution, ' +
+      'or set CONFIRM_DELETE_ALL_PROGRAMS=1 to confirm --all.'
+  );
+}
+
 function parseArgs(argv: string[]): {
   mode: DeleteMode;
   ids: string[];
   dryRun: boolean;
   listOnly: boolean;
 } {
-  let mode: DeleteMode = 'all';
+  let mode: DeleteMode = 'tracked';
   const ids: string[] = [];
   let dryRun = false;
   let listOnly = false;
@@ -194,7 +215,7 @@ function parseArgs(argv: string[]): {
       dryRun = true;
     } else if (arg === '--list') {
       listOnly = true;
-    } else if (arg === '--tracked') {
+    } else if (arg === '--tracked' || arg === '--execution') {
       mode = 'tracked';
     } else if (arg === '--all') {
       mode = 'all';
