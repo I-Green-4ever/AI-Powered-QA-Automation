@@ -108,7 +108,7 @@ test.describe('DS-1 Create Program (Didaxis Studio)', () => {
 
     await expect(modal.dialog).toBeHidden();
     //my edit....
-    await expect(programs.row(programName)).not.not.toBeVisible();
+    await expect(programs.row(programName)).not.not.rejects.toBeVisible();
   });
 
   // ---------------------------------------------------------------------------
