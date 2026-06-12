@@ -11,7 +11,7 @@
     "test:chromium": "playwright test --project=chromium",
     "test:firefox": "playwright test --project=firefox",
     "test:webkit": "playwright test --project=webkit",
-    "test:report": "playwright show-report",
+    "test:report": "playwright show-report Reports/playwright-report",
     "codegen": "playwright codegen",
     "delete-programs": "tsx lib/delete-programs.ts"
   },
