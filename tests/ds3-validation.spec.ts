@@ -3,6 +3,8 @@ import { clickCreateAndTrack, createProgram } from './helpers/program';
 import { openNewProgramModal, openEditModal } from './helpers/programs-ui';
 import { ProgramsPage } from '../pages/programs.page';
 import { AppShell } from '../pages/app-shell.page';
+import { AUTH_STORAGE_PATH } from '../lib/auth';
+import { attachProgramCreateAutoTracker } from '../lib/program-tracker';
 import type { Dialog } from '@playwright/test';
 import { format } from 'date-fns';
 
@@ -102,6 +104,7 @@ test.describe('DS-3 Program Name Validation & Duplicate Prevention (Didaxis Stud
   test('TC-005 - Whitespace-only name (3 spaces) is rejected — form not submitted (AC1 verbatim)', async ({ page }) => {
     const programs = new ProgramsPage(page);
     const modal = await openNewProgramModal(page);
+    const initialRowCount = await programs.dataRows.count();
 
     // Track any POST /api/programs traffic — none should occur for this case.
     let postCount = 0;
@@ -118,8 +121,9 @@ test.describe('DS-3 Program Name Validation & Duplicate Prevention (Didaxis Stud
     await expect(modal.createButton).toBeDisabled();
     await expect(modal.dialog).toBeVisible();
 
-    // No row literally named "   " or "" should ever exist.
-    await expect(programs.exactText('   ')).toHaveCount(0);
+    // No new program row; avoid page-wide exactText('   ') — it matches unrelated DOM.
+    await expect(programs.row('   ')).toHaveCount(0);
+    await expect(programs.dataRows).toHaveCount(initialRowCount);
     expect(postCount).toBe(0);
   });
 
@@ -138,16 +142,25 @@ test.describe('DS-3 Program Name Validation & Duplicate Prevention (Didaxis Stud
   test('TC-007 - Tabs / newlines / non-breaking-space whitespace are treated as empty', async ({ page }) => {
     const programs = new ProgramsPage(page);
     const modal = await openNewProgramModal(page);
+    const initialRowCount = await programs.dataRows.count();
 
     // Tab + ASCII space + NBSP (U+00A0) + newline.
     const whitespaceMix = '\t \u00A0\n';
+
+    let postCount = 0;
+    page.on('request', (req) => {
+      if (req.method() === 'POST' && /\/api\/programs(\?|$)/.test(req.url())) {
+        postCount++;
+      }
+    });
 
     await modal.fillProgramName(whitespaceMix);
 
     // Per AC1 (post-trim) the form should not be submittable.
     await expect(modal.createButton).toBeDisabled();
     await expect(modal.dialog).toBeVisible();
-    await expect(programs.exactText(whitespaceMix)).toHaveCount(0);
+    await expect(programs.dataRows).toHaveCount(initialRowCount);
+    expect(postCount).toBe(0);
   });
 
   test('TC-008 - Creating a second program with an existing name is rejected (AC3 verbatim)', async ({ page }) => {
@@ -271,12 +284,80 @@ test.describe('DS-3 Program Name Validation & Duplicate Prevention (Didaxis Stud
     await expect(programs.exactText(baseName)).toHaveCount(1);
   });
 
-  // Requires two concurrent admin sessions racing the same POST. Out of
-  // scope for a single-page test; left as documentation for an integration
-  // run that uses two browser contexts.
-  test.skip('TC-014 - Race: two clients create the same name nearly simultaneously', async () => {
-    // Two browser.newContext() sessions, both POST same name back-to-back;
-    // exactly one row must be created; the loser sees the duplicate error.
+  test('TC-014 - Race: two clients create the same name nearly simultaneously', async ({
+    browser,
+  }) => {
+    const programName = `I.G. Race ${uniqueSuffix()}`;
+    const description = 'I.G. race duplicate';
+
+    const contextA = await browser.newContext({
+      storageState: AUTH_STORAGE_PATH,
+    });
+    const contextB = await browser.newContext({
+      storageState: AUTH_STORAGE_PATH,
+    });
+
+    const pageA = await contextA.newPage();
+    const pageB = await contextB.newPage();
+
+    attachProgramCreateAutoTracker(pageA);
+    attachProgramCreateAutoTracker(pageB);
+
+    const postDelayMs = 2000;
+    await pageA.route('**/api/programs', async (route) => {
+      if (route.request().method() === 'POST') {
+        await new Promise((resolve) => setTimeout(resolve, postDelayMs));
+      }
+      await route.continue();
+    });
+    await pageB.route('**/api/programs', async (route) => {
+      if (route.request().method() === 'POST') {
+        await new Promise((resolve) => setTimeout(resolve, postDelayMs));
+      }
+      await route.continue();
+    });
+
+    const modalA = await openNewProgramModal(pageA);
+    const modalB = await openNewProgramModal(pageB);
+
+    await modalA.fillProgramName(programName);
+    await modalA.fillDescription(description);
+    await modalB.fillProgramName(programName);
+    await modalB.fillDescription(description);
+
+    const isCreatePost = (url: string, method: string) =>
+      method === 'POST' && /\/api\/programs(\?|$)/.test(url);
+
+    const responseA = pageA.waitForResponse(
+      (r) => isCreatePost(r.url(), r.request().method()),
+      { timeout: 15_000 }
+    );
+    const responseB = pageB.waitForResponse(
+      (r) => isCreatePost(r.url(), r.request().method()),
+      { timeout: 15_000 }
+    );
+
+    await Promise.all([modalA.clickCreate(), modalB.clickCreate()]);
+
+    const [respA, respB] = await Promise.all([responseA, responseB]);
+    const successfulPosts = [respA, respB].filter((r) => r.ok());
+    expect(successfulPosts).toHaveLength(1);
+
+    const programsA = new ProgramsPage(pageA);
+    await programsA.goto();
+    await expect(programsA.row(programName)).toHaveCount(1);
+
+    const modalAHidden = await modalA.dialog.isHidden();
+    const modalBHidden = await modalB.dialog.isHidden();
+    expect(modalAHidden !== modalBHidden).toBe(true);
+
+    const loserModal = modalAHidden ? modalB : modalA;
+    await expect(loserModal.dialog).toBeVisible();
+    const error = loserModal.fieldAlert.or(loserModal.duplicateError);
+    await expect(error).toBeVisible();
+
+    await contextA.close();
+    await contextB.close();
   });
 
   // ---------------------------------------------------------------------------
