@@ -38,15 +38,12 @@ alwaysApply: false
 
 ## Routing
 
-| Trigger | Action |
-|---------|--------|
-| **Ticket given** | Analyze via `jira-ticket-analyzer`; save plan to `features/<ticket-key>.feature.md`; pause for human review |
-| **Plan approved** | Delegate to `test-writer` via Task (`subagent_type: test-writer`) |
-| **Spec returned** | Run `npx playwright test tests/<spec>.spec.ts` |
-| **Run is red** | Delegate to `triage` via Task (`subagent_type: triage`) with run id/URL |
-| **Real app bug** | Get human confirmation; delegate to `bug-reporter` via Task (`subagent_type: bug-reporter`) |
-| **Test issue** | Delegate to `test-writer` with diagnosis; human OKs fix before re-run |
-| **Failed run id (no ticket)** | Delegate to `triage` first; route from classification |
+- **Ticket given** → analyze → produce test plan → save to `features/{ticket_number}`
+- **Plan ready** → delegate to `test-writer` (ref: playwright-conventions.mdc)
+- **Spec returned** → run: `npx playwright test`
+- **Run is red** → delegate to `triage`
+- **Real app bug** → delegate to `bug-reporter`
+- **Test issue** → delegate to `test-writer` (propose fix, human OKs)
 
 ## Delegation handoff
 

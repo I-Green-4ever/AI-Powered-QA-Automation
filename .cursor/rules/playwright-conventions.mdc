@@ -1,0 +1,323 @@
+---
+alwaysApply: false
+description: How this project writes Playwright tests — locators, waiting, POM, auth, data, API, mocking, accessibility, assertions, and anti-flake. Apply to all test work under tests/.
+globs: tests/**
+---
+# Playwright Conventions
+## Locators role/label first; testid escape hatch; never CSS/XPath
+## Waiting web-first assertions only; never waitForTimeout
+## Page Objects one per page; locators in constructor; no assertions in POMs
+## Auth storageState via the setup project; API-login for speed
+## Data unique data (Date.now()); every test cleans up after itself
+## API request fixture for setup/teardown and contract checks
+## Mocking route/fulfill for 500/503/timeout/empty/malformed
+## Accessibility axe scan (wcag2a/aa) on key pages + a keyboard-nav check
+## Assertions web-first; soft for multi-check; visual where it earns it
+## Anti-flake CI-only retries; isolation; page.clock; pinned locale/timezone
+
+Each rule below shows the standard, then a ✅ good and ❌ bad example. When in doubt, prefer the example a *user* (or a screen reader) would recognize over the one coupled to markup.
+
+## 1. Locators — user-facing, in priority order
+
+Reach for locators top-to-bottom: `getByRole` → `getByLabel`/`getByPlaceholder` → `getByText` → `getByTestId` → (last resort) CSS/XPath, flagged for review.
+
+✅ **Good**
+
+```tsx
+await page.getByRole('button', { name: 'New Program' }).click();
+await page.getByLabel('Program Name').fill('Web Development 2026');
+await page.getByRole('row', { name: /Web Development 2026/ }).getByRole('button', { name: 'Edit' }).click();
+```
+
+❌ **Bad**
+
+```tsx
+await page.locator('.btn.btn-primary').click();            // couples to CSS classes
+await page.locator('#root > div > div:nth-child(3) input').fill('x'); // breaks on any layout change
+await page.locator('//button[2]').click();                 // XPath by position — meaningless and brittle
+```
+**Why:** role/label locators survive restyling and refactors, and they double as an accessibility check — if `getByRole('button', { name: 'Create' })` finds it, the control has an accessible name. `getByTestId` is the escape hatch when nothing user-facing fits; CSS/XPath is a smell.
+
+## 2. Waiting — web-first assertions only, never fixed timeouts
+
+Never `waitForTimeout`. `expect()` retries until the condition holds or the timeout expires.
+
+✅ **Good**
+
+```tsx
+await page.getByRole('button', { name: 'Save' }).click();
+await expect(page.getByText('Program updated')).toBeVisible();
+await expect(page.getByRole('button', { name: 'Save' })).toBeEnabled();
+```
+
+❌ **Bad**
+
+```tsx
+await page.getByRole('button', { name: 'Save' }).click();
+await page.waitForTimeout(2000);                 // a bet: too short = flaky, too long = slow
+expect(await page.getByText('Program updated').isVisible()).toBe(true); // snapshot, no retry
+```
+
+**Why:** a fixed wait guesses a duration; a web-first assertion waits for *reality*. `isVisible()` returns a boolean once and never retries — use `expect(locator).toBeVisible()` instead.
+
+## 3. Page Object Model — locators in, assertions out
+
+One POM per page/component. Locators live in the constructor; methods perform user actions; **no assertions in a POM** — those belong in the test, which describes intent.
+
+✅ **Good**
+
+```tsx
+// e2e/pages/program-form.page.ts
+export class ProgramFormPage {
+  constructor(private page: Page) {}
+  readonly name = this.page.getByLabel('Program Name');
+  readonly create = this.page.getByRole('button', { name: 'Create' });
+
+  async createProgram(name: string) {
+    await this.name.fill(name);
+    await this.create.click();
+  }
+}
+
+// e2e/tests/program-create.spec.ts
+await form.createProgram(unique('Web Dev'));
+await expect(list.row(name)).toBeVisible();        // assertion lives in the test
+```
+
+❌ **Bad**
+
+```tsx
+export class ProgramFormPage {
+  async createProgram(name: string) {
+    await this.page.fill('#name', name);
+    await this.page.click('.submit');
+    await expect(this.page.getByText('created')).toBeVisible(); // assertion buried in the POM
+  }
+}
+```
+
+**Why:** assertions in POMs hide what a test verifies and make POMs un-reusable across tests that expect different outcomes. The test should read like the intent; the POM is the *how*.
+
+## 4. Auth — log in once with storageState; never per test
+
+Authenticate once in a setup project, save `storageState`, and let every test inherit it. Use API login when the UI login isn't what's under test.
+
+✅ **Good**
+
+```tsx
+// e2e/auth.setup.ts
+setup('authenticate', async ({ page }) => {
+  await page.goto('/login');
+  await page.getByLabel('Email').fill(process.env.DIDAXIS_EMAIL!);
+  await page.getByLabel('Password').fill(process.env.DIDAXIS_PASSWORD!);
+  await page.getByRole('button', { name: 'Sign In' }).click();
+  await page.context().storageState({ path: 'playwright/.auth/user.json' });
+});
+// config: main project has dependencies: ['setup'], use: { storageState: 'playwright/.auth/user.json' }
+```
+
+❌ **Bad**
+
+```tsx
+test.beforeEach(async ({ page }) => {       // logs in before EVERY test — slow, flaky
+  await page.goto('/login');
+  await page.getByLabel('Email').fill('admin@didaxis.studio'); // hardcoded credential
+  await page.getByLabel('Password').fill('hunter2');
+  await page.getByRole('button', { name: 'Sign In' }).click();
+});
+```
+
+**Why:** per-test UI login multiplies runtime and adds a flaky dependency to every test. The auth file is git-ignored and regenerated each run (locally and in CI). Credentials come from `process.env`, never hardcoded.
+
+## 5. Test data — unique, self-cleaning, isolated
+
+Every test creates its own data with a unique name and cleans up after itself. Tests must not depend on each other or on leftover state.
+
+✅ **Good**
+
+```tsx
+const unique = (p: string) => `${p}-${Date.now()}`;
+
+test('creates a program', async ({ page, request }) => {
+  const name = unique('Web Dev');
+  // ... create via UI ...
+  await expect(list.row(name)).toBeVisible();
+});
+
+test.afterEach(async ({ request }) => {
+  await cleanupProgramsByPrefix(request, 'Web Dev-');   // API teardown
+});
+```
+
+❌ **Bad**
+
+```tsx
+test('creates a program', async ({ page }) => {
+  await form.createProgram('Web Development');   // same name every run → collides on 2nd run
+});                                              // no cleanup → pollutes the next run / CI
+```
+
+**Why:** shared or static data makes tests order-dependent and flaky in parallel. `Date.now()` keeps names unique; API cleanup is faster and more reliable than clicking through the UI.
+
+## 6. API testing — use the `request` fixture for setup, teardown, and contracts
+
+Use the API for state you don't want to build through the UI, for teardown, and for contract checks. Mix API setup with UI assertions to keep tests fast and focused.
+
+✅ **Good**
+
+```tsx
+test('list shows a program created via API', async ({ page, request }) => {
+  const res = await request.post('/api/programs', { data: { name: unique('API Prog') } });
+  expect(res.ok()).toBeTruthy();
+  const { id, name } = await res.json();
+  await page.goto('/programs');
+  await expect(page.getByRole('row', { name })).toBeVisible();
+  await request.delete(`/api/programs/${id}`);    // teardown via API
+});
+```
+
+❌ **Bad**
+
+```tsx
+test('list shows a program', async ({ page }) => {
+  // builds 10 prerequisite programs by clicking through the UI — slow and fragile
+  for (let i = 0; i < 10; i++) await form.createProgram(`Prog ${i}`);
+});
+```
+
+**Why:** the UI is for testing the UI, not for manufacturing prerequisite data. API setup/teardown is an order of magnitude faster and far less flaky.
+
+## 7. Network mocking — make edge cases deterministic
+
+Mock the failures you can't trigger on demand: `500`, `503`, timeout, empty list, malformed payload, slow response. Mock the case you're forcing — never mock the thing you're trying to test.
+
+✅ **Good**
+
+```tsx
+test('shows an error when save fails', async ({ page }) => {
+  await page.route('**/api/programs', route =>
+    route.fulfill({ status: 503, body: 'Service Unavailable' }));
+  await form.createProgram(unique('Web Dev'));
+  await expect(page.getByText('Something went wrong')).toBeVisible();
+});
+
+test('handles an empty list', async ({ page }) => {
+  await page.route('**/api/programs', route =>
+    route.fulfill({ status: 200, body: '[]' }));
+  await page.goto('/programs');
+  await expect(page.getByText('No programs yet')).toBeVisible();
+});
+```
+
+❌ **Bad**
+
+```tsx
+test('create works', async ({ page }) => {
+  await page.route('**/api/programs', route =>
+    route.fulfill({ status: 200, body: JSON.stringify({ id: 1, name: 'x' }) }));
+  await form.createProgram('x');                 // mocks the very endpoint under test → proves nothing
+  await expect(page.getByText('created')).toBeVisible();
+});
+```
+
+**Why:** happy-path tests prove the app works when the server behaves; mocking proves it survives when the server misbehaves — which production guarantees. Use `routeFromHAR` to replay a recorded session when you need realistic payloads.
+
+## 8. Accessibility — axe is the floor, keyboard + names are the rest
+
+Run an automated scan on key pages, and add the checks axe can't make: keyboard operability and accessible names. Axe catches roughly a third of issues; you own the other two-thirds.
+
+✅ **Good**
+
+```tsx
+import AxeBuilder from '@axe-core/playwright';
+
+test('programs page has no a11y violations', async ({ page }) => {
+  await page.goto('/programs');
+  const results = await new AxeBuilder({ page }).withTags(['wcag2a', 'wcag2aa']).analyze();
+  expect(results.violations).toEqual([]);
+});
+
+test('new-program flow is keyboard operable', async ({ page }) => {
+  await page.goto('/programs');
+  await page.keyboard.press('Tab');
+  await expect(page.getByRole('button', { name: 'New Program' })).toBeFocused();
+  await page.keyboard.press('Enter');
+  await expect(page.getByRole('dialog', { name: 'New Program' })).toBeVisible();
+});
+```
+
+❌ **Bad**
+
+```tsx
+test('page looks fine', async ({ page }) => {
+  await page.goto('/programs');
+  // eyeballed once in dev; no scan, no keyboard path, no assertion
+});
+// or: an icon-only button with no accessible name —
+await page.locator('button.icon-edit').click();   // getByRole('button', { name: 'Edit' }) would FAIL here, which is the bug
+```
+
+**Why:** a control a screen reader can't name is broken the same way a 500 is broken — you just had no test that noticed. If your `getByRole(... name ...)` locators work, your accessible names are sane; if they don't, that failure *is* the accessibility bug. Scope scans with `.include()/.exclude()` for third-party widgets.
+
+## 9. Assertions — web-first by default, soft for multi-check, visual where it earns it
+
+Prefer auto-retrying web-first assertions. Use `expect.soft` to collect several checks in one run. Use visual snapshots sparingly, masking dynamic regions.
+
+✅ **Good**
+
+```tsx
+// collect all failures instead of stopping at the first
+await expect.soft(page.getByRole('heading', { name: 'Programs' })).toBeVisible();
+await expect.soft(page.getByRole('button', { name: 'New Program' })).toBeEnabled();
+
+// visual, with dynamic content masked
+await expect(page).toHaveScreenshot('programs.png', {
+  mask: [page.getByRole('cell', { name: /Updated/ })],
+});
+```
+
+❌ **Bad**
+
+```tsx
+const text = await page.getByRole('heading').textContent();
+expect(text).toContain('Programs');               // no retry; races the render
+
+await expect(page).toHaveScreenshot();             // unmasked timestamps → fails every run
+```
+
+**Why:** non-retrying assertions race the UI; web-first assertions wait. Unmasked visual snapshots flake on any dynamic content. Soft assertions turn three reruns into one informative failure.
+
+## 10. Anti-flake — flake is a configuration choice
+
+Retries in CI only, full isolation, pinned locale/timezone, controlled time, trace on first retry.
+
+✅ **Good**
+
+```tsx
+// playwright.config.ts
+export default defineConfig({
+  fullyParallel: true,
+  retries: process.env.CI ? 2 : 0,        // local runs fail loudly; CI tolerates a transient blip
+  use: {
+    baseURL: process.env.DIDAXIS_URL,
+    trace: 'on-first-retry',
+    locale: 'en-CA',
+    timezoneId: 'America/Toronto',         // kills date/locale flake
+  },
+});
+
+// freeze time so a "created 2 minutes ago" label is deterministic
+await page.clock.install({ time: new Date('2026-06-08T12:00:00') });
+```
+
+❌ **Bad**
+
+```tsx
+export default defineConfig({
+  retries: 5,                              // hides real flake behind brute force
+  workers: 1,                              // serial "fix" for tests that share state
+});
+// tests that read `new Date()` and assert on "today" → break at midnight / across timezones
+```
+
+**Why:** retries buy a green build, not a fixed one — a test that only passes on retry is a bug with a snooze button; track those. Pinned locale/timezone and `page.clock` remove whole classes of time-dependent flake. Cranking `workers: 1` to stop collisions hides the real problem: tests that aren't isolated.
