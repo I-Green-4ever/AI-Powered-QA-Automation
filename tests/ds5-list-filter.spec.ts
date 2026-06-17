@@ -4,7 +4,7 @@ import { openEditModal } from './helpers/programs-ui';
 import { ProgramsPage } from '../pages/programs.page';
 import { AppShell } from '../pages/app-shell.page';
 import { LoginPage } from '../pages/login.page';
-import type { Dialog } from '@playwright/test';
+import type { Dialog, Route } from '@playwright/test';
 import { format } from 'date-fns';
 
 /**
@@ -100,7 +100,7 @@ test.describe('DS-5 Program List & Display (Didaxis Studio)', () => {
         await route.fulfill({
           status: 200,
           contentType: 'application/json',
-          body: JSON.stringify([]),
+          body: JSON.stringify({ data: [] }),
         });
         return;
       }
@@ -117,8 +117,8 @@ test.describe('DS-5 Program List & Display (Didaxis Studio)', () => {
     // per plan ambiguity #4, so match loosely.
     await expect(programs.emptyStateHint).toBeVisible();
 
-    // (b) Some create affordance is reachable from this state.
-    await expect(programs.newProgramButtonAlt).toBeVisible();
+    // (b) Some create affordance is reachable from this state (+ New Program or Create Program).
+    await expect(programs.newProgramButton).toBeVisible();
   });
 
   test('TC-005 - Deleting the last program triggers the empty state (cross-cuts DS-4)', async ({ page }) => {
@@ -127,19 +127,19 @@ test.describe('DS-5 Program List & Display (Didaxis Studio)', () => {
     const programId = `mock-solo-${Date.now()}`;
     const description = 'I.G. solo precondition';
 
-    // Make GET return exactly one fake program, then return [] after DELETE.
+    // Make GET return exactly one fake program, then return { data: [] } after DELETE.
     let deleted = false;
-    await page.route('**/api/programs**', async (route) => {
+    const handleProgramsApi = async (route: Route) => {
       const req = route.request();
       const url = new URL(req.url());
       if (req.method() === 'GET' && url.pathname === '/api/programs') {
-        const body = deleted
+        const data = deleted
           ? []
           : [{ id: programId, name: programName, description }];
         await route.fulfill({
           status: 200,
           contentType: 'application/json',
-          body: JSON.stringify(body),
+          body: JSON.stringify({ data }),
         });
         return;
       }
@@ -152,7 +152,9 @@ test.describe('DS-5 Program List & Display (Didaxis Studio)', () => {
         return;
       }
       await route.continue();
-    });
+    };
+    await page.route('**/api/programs', handleProgramsApi);
+    await page.route('**/api/programs/*', handleProgramsApi);
 
     await programs.goto();
     const row = programs.programRow(programName);
@@ -174,7 +176,7 @@ test.describe('DS-5 Program List & Display (Didaxis Studio)', () => {
         await route.fulfill({
           status: 200,
           contentType: 'application/json',
-          body: JSON.stringify([]),
+          body: JSON.stringify({ data: [] }),
         });
         return;
       }
@@ -183,11 +185,10 @@ test.describe('DS-5 Program List & Display (Didaxis Studio)', () => {
 
     await programs.goto();
     await expect(programs.dataRows).toHaveCount(0);
+    await expect(programs.emptyStateHint).toBeVisible();
 
-    // Click the create CTA reachable from the empty state.
-    await programs.newProgramButtonAlt.first().click({ force: true });
-
-    const modal = programs.newProgram;
+    // Empty-state CTA — stable role/name locator (header "+ New Program" also valid per AC2).
+    const modal = await programs.openNewProgram();
     await expect(modal.dialog).toBeVisible();
 
     const programName = `I.G. First ${uniqueSuffix()}`;
@@ -203,9 +204,9 @@ test.describe('DS-5 Program List & Display (Didaxis Studio)', () => {
         await route.fulfill({
           status: 200,
           contentType: 'application/json',
-          body: JSON.stringify([
-            { id: 'mock-first', name: programName, description },
-          ]),
+          body: JSON.stringify({
+            data: [{ id: 'mock-first', name: programName, description }],
+          }),
         });
         return;
       }
@@ -256,6 +257,9 @@ test.describe('DS-5 Program List & Display (Didaxis Studio)', () => {
 
   test('TC-008 - Slow / pending request shows a clear loading state, not a flash of empty state', async ({ page }) => {
     const programs = new ProgramsPage(page);
+    const programName = `I.G. Loading ${uniqueSuffix()}`;
+    // Seed one row so the post-load UI renders the table (empty tenant shows a card, not <table>).
+    await createProgram(page, programName, 'I.G. loading precondition');
 
     // Hold the response open for ~2s so we can observe the loading state.
     await page.route('**/api/programs', async (route) => {
