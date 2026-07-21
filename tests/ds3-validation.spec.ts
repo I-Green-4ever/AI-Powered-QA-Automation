@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto';
-import type { Page, Request } from '@playwright/test';
-import { test, expect } from '../fixtures/cleanup.fixture';
+import type { Page, Request, Response } from '@playwright/test';
+import { test, expect, trackProgram } from '../fixtures/cleanup.fixture';
 import { ProgramsPage } from '../pages/programs.page';
+import type { NewProgramModal } from '../pages/components/new-program.modal';
 import { clickCreateAndTrack, createProgram } from './helpers/program';
 import { openNewProgramModal } from './helpers/programs-ui';
 
@@ -28,6 +29,55 @@ function observeProgramCreateRequests(page: Page): {
     count: () => postCount,
     close: () => page.off('request', onRequest),
   };
+}
+
+async function clickCreateAndWaitForDuplicateAttempt(
+  page: Page,
+  modal: NewProgramModal
+): Promise<void> {
+  let createResponse: Response | undefined;
+  const duplicateError = modal.fieldAlert.or(modal.duplicateError);
+  const onResponse = (response: Response): void => {
+    if (
+      response.request().method() === 'POST' &&
+      /\/api\/programs\/?$/.test(new URL(response.url()).pathname)
+    ) {
+      createResponse = response;
+    }
+  };
+
+  page.on('response', onResponse);
+  try {
+    await modal.clickCreate();
+    await expect
+      .poll(
+        async () =>
+          createResponse !== undefined || (await duplicateError.isVisible()),
+        {
+          message:
+            'duplicate create attempt should settle with a POST response or visible error',
+          timeout: 30_000,
+        }
+      )
+      .toBe(true);
+
+    if (!createResponse) return;
+
+    const responseError = await createResponse.finished();
+    if (responseError) throw responseError;
+    if (!createResponse.ok()) return;
+
+    const body = (await createResponse.json()) as {
+      data?: { id?: string };
+      id?: string;
+    };
+    const programId = body.data?.id ?? body.id;
+    if (typeof programId === 'string' && programId.length > 0) {
+      trackProgram(programId);
+    }
+  } finally {
+    page.off('response', onResponse);
+  }
 }
 
 test.describe('DS-3 Program name validation and duplicate prevention', () => {
@@ -132,6 +182,7 @@ test.describe('DS-3 Program name validation and duplicate prevention', () => {
     const description = 'Full-stack web curriculum';
     await createProgram(page, programName, 'Duplicate-test precondition');
 
+    const programs = new ProgramsPage(page);
     const modal = await openNewProgramModal(page);
     await modal.fillProgramName(programName);
     await modal.fillDescription(description);
@@ -140,11 +191,12 @@ test.describe('DS-3 Program name validation and duplicate prevention', () => {
       true,
       'DS-153: duplicate creation currently succeeds and closes the form instead of preserving its values'
     );
-    await modal.clickCreate();
+    await clickCreateAndWaitForDuplicateAttempt(page, modal);
 
-    await expect(modal.dialog).toBeVisible();
-    await expect(modal.programNameInput).toHaveValue(programName);
-    await expect(modal.descriptionInput).toHaveValue(description);
+    await expect.soft(modal.dialog).toBeVisible();
+    await expect.soft(modal.programNameInput).toHaveValue(programName);
+    await expect.soft(modal.descriptionInput).toHaveValue(description);
+    await expect.soft(programs.row(programName)).toHaveCount(1);
   });
 
   // Edge cases
