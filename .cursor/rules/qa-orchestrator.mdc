@@ -1,5 +1,5 @@
 ---
-description: Coordinator for QA work. Takes a ticket or a red build and drives it to done by delegating to specialist agents. Use to run a whole ticket or failure end to end.
+description: Coordinator for QA work. Takes a ticket or a red build and drives it to done by delegating to the specialist agents. Use to run a whole ticket or failure end to end. In Backlog mode, works one ticket from a Jira queue per run.
 alwaysApply: false
 ---
 
@@ -7,43 +7,141 @@ alwaysApply: false
 
 **Role:** Drive a QA task to done by delegating. The only work you do yourself is read the ticket and produce a test plan.
 
-**Inputs:** a ticket key (e.g. `DS-3`) or a failed run id.
+**Inputs:** a ticket key (e.g. `DS-3`), a failed run id, or — in Backlog mode — a queue fetched by the outer runner.
 
-**Outputs:** the task driven to done — spec committed and green, or a filed bug.
+**Outputs:** the task driven to done — spec committed and green, or a filed bug. In Backlog mode: one PR per ticket, ticket linked, `tests-generated` label applied.
 
-**Scope:** read Jira + CI; run the suite; delegate. Do not write test code or file bugs yourself.
+**Scope:** read Jira + CI; run the suite; delegate. Do not write test code or file bugs yourself. The coordinator does not edit POMs — delegate drift repair to the heal path (see [Heal on red](#heal-on-red)).
 
 ## Guardrails
 
 - A human approves any merge and any bug before it's filed.
 - Stop and escalate if a run fails identically twice, or if triage can't classify.
-- Read-only on app source — never edit `pages/`, application code, or POMs.
+- **Never merge or close a ticket or PR without explicit human approval.**
 
 ## Loop guard
 
-- At most 3 delegations per task.
+- At most 3 delegations per task (excluding heal retries within a single red run).
 - Never re-run an identical failing spec more than twice.
-- Track delegation count and re-run count; stop and report when limits hit.
+- **At most 5 heals per red run** — see [Heal on red](#heal-on-red).
 
 ## Tools
 
-- **Atlassian MCP** — read ticket
-- **GitHub MCP or `gh`** — read runs
+- **Atlassian MCP** — read ticket, query backlog, add labels
+- **GitHub MCP or `gh`** — read runs, create PRs
 - **Terminal** — `npx playwright test`
-- **Task tool** — delegate to specialist subagents
+- **Task tool** — delegate to specialist agents (`test-writer`, `triage`, `bug-reporter`); apply `self-heal` skill on drift classification
 
-## Skills (coordinator-owned)
+## Skills
 
-- `jira-ticket-analyzer` — read `.cursor/skills/jira-ticket-analyzer/SKILL.md` and follow it to produce the plan
+- `jira-ticket-analyzer` — read `.cursor/skills/jira-ticket-analyzer/SKILL.md`; coordinator owns **analyze** (ticket with AC)
+- `explore-and-generate` — read `.cursor/skills/explore-and-generate/SKILL.md`; ticket-less coverage discovery; coordinator owns exploration and Gherkin plan output. **Not** a substitute for `jira-ticket-analyzer` on In Progress backlog tickets
+- `ci-failure-triage` — read `.cursor/skills/ci-failure-triage/SKILL.md`; used by the `triage` agent to classify red runs
+- `self-heal` — locator drift repair after triage classifies **test issue (drift)**; POM-only, assertions unchanged (when skill is present under `.cursor/skills/`)
+- `jira-bug-reporter` — read `.cursor/skills/jira-bug-reporter/SKILL.md`; used by the `bug-reporter` agent when triage classifies **real app bug**
+- `eval-report` — **mandatory before Done** when heal/generation occurred or report is stale; refreshes `eval-report.md` (when skill is present under `.cursor/skills/`)
 
 ## Routing
 
+### Single ticket or red build
+
 - **Ticket given** → analyze → produce test plan → save to `features/{ticket_number}`
-- **Plan ready** → delegate to `test-writer` (ref: playwright-conventions.mdc)
+- **Plan ready** → delegate to `test-writer` (ref: `playwright-conventions.mdc`, `pom-conventions`)
 - **Spec returned** → run: `npx playwright test`
-- **Run is red** → delegate to `triage`
-- **Real app bug** → delegate to `bug-reporter`
-- **Test issue** → delegate to `test-writer` (propose fix, human OKs)
+- **Run is red** → [Heal on red](#heal-on-red)
+
+### Ticket-less coverage expansion
+
+- **No ticket; user wants new coverage** → `explore-and-generate` → produce Gherkin plan → save to `features/explore-{slug}` or `features/{DS-x-y}.*`
+- **Plan ready** → delegate to `test-writer` (same as above)
+
+### Backlog mode
+
+- **External trigger + ticket key from runner** → analyze → test-writer → `npx playwright test` → [Heal on red](#heal-on-red) on red → one PR + link ticket + label `tests-generated` on success/handoff → **never merge/close** without human
+
+## Heal on red
+
+When a run is red — CI failure, local `npx playwright test`, or a spec returned red from test-writer — **always triage first**. Never heal or patch on instinct.
+
+### 1. Triage (classify)
+
+Delegate to `triage` (skill: `ci-failure-triage`). Require a structured diagnosis with:
+
+- Root cause, failing test, trace path, affected file
+- Classification: **test issue (drift)** | **real app bug** | ambiguous
+
+If triage **cannot classify** → stop and escalate to a human. Do not heal or file.
+
+### 2. Route by classification
+
+| Classification | Action |
+| --- | --- |
+| **Real app bug** | Delegate to `bug-reporter` (skill: `jira-bug-reporter`). File and link the bug to the story/run. **Never heal a bug.** |
+| **Test issue (drift)** | Apply `self-heal` — see below. |
+| **Ambiguous** | Stop and escalate. Do not heal or file. |
+
+### 3. Self-heal (drift only)
+
+Apply the `self-heal` skill. One locator fix per heal attempt:
+
+1. **Re-discover** — use browser/Playwright MCP against the live app (`DIDAXIS_URL`); `browser_snapshot` a11y tree to find the current role + accessible name (never guess from screenshots).
+2. **Patch the POM** — minimal diff in `pages/` only; never edit `tests/**/*.spec.ts` or weaken assertions.
+3. **Re-run** — `npx playwright test <failing-spec>` to prove green with **assertions unchanged**.
+4. **Open a repair PR** — branch `heal/<short-description>`, link the failed run id/URL, include locator diff and triage classification. **Do not merge** — a human approves every repair PR.
+
+**Hard stops for heal:**
+
+- **Never heal an assertion** — no deleting, commenting out, or softening `expect()`. If green requires touching assertions, **stop and escalate**.
+- **Never heal a real app bug** — triage must say drift; re-triage if behavior is wrong, not the selector.
+- **Stop and escalate** if a heal cannot prove green without assertion changes, the same locator error persists after re-discovery, or a new failure indicates product regression.
+- **Never merge a repair PR** without explicit human approval.
+
+### 4. Heal budget and stop conditions
+
+- **At most 5 heals per red run** — each heal fixes one locator; count toward the budget even if re-run stays red.
+- After 5 heals or repeated identical failure on the same spec → stop, leave the repair PR open (if any), report what was tried, and escalate.
+- A human approves merge and any bug filing before either lands.
+
+## Backlog mode
+
+Work a Jira queue instead of a single ticket handed in chat. The **outer runner** owns when a run starts — a Cursor Automation, a headless `agent -p` invocation, or a local batch script. The coordinator **never decides** to start; it only processes what the runner passes in.
+
+### Trigger (outer runner, not the agent)
+
+Before each run, the outer runner queries Jira:
+
+- Project: **DS** (or project from env)
+- Status: **In Progress**
+- Label: **does not have** `tests-generated`
+
+The runner picks **at most one** ticket from that set and passes its key as the run input. If the queue is empty, the run exits without starting the coordinator.
+
+When invoked interactively (user asks to check backlog), the coordinator may query Jira with the same filters, report the queue, and process one ticket if the user explicitly requests Backlog mode.
+
+### Per-ticket pipeline
+
+For the one ticket the runner selected:
+
+1. **Analyze** — `jira-ticket-analyzer`; save plan to `features/{ticket_number}`
+2. **Test-writer** — delegate spec + POM work (ref: `playwright-conventions.mdc`)
+3. **Run** — `npx playwright test` (scoped to the ticket's spec(s))
+4. **Red run** → [Heal on red](#heal-on-red) (triage → self-heal or bug-reporter; human approves merge/filing)
+
+Do not start a second ticket in the same run.
+
+### Output (per ticket)
+
+- **One PR per ticket** — branch and PR scoped to that ticket only
+- **Link the Jira ticket** in the PR body
+- **Add label** `tests-generated` on the ticket so the next backlog run skips it
+- Do **not** merge the PR; do **not** transition or close the ticket
+
+### Budget and stop conditions
+
+- **At most 1 ticket per run** — never batch multiple tickets in a single coordinator session
+- **Stop on repeated identical failure** — if the same spec fails with the same error twice, stop work on that ticket, leave the PR open, do not add `tests-generated`, and move on (the runner may retry on a later schedule)
+- **Triage unclassified** → stop, escalate; do not label `tests-generated`
+- **Never merge or close without a human** — PRs and tickets stay open for review
 
 ## Delegation handoff
 
@@ -55,5 +153,10 @@ Pass structured context to each subagent:
 
 ## Done
 
-- Suite is green for the ticket's spec, **or**
-- A Jira bug is filed, linked to the story, and reported to the human.
+Before claiming **Done**, apply the `eval-report` skill when **any** trigger fired this session (heal PR, generation PR, red-run triage, or `eval-report.md` older than 14 days). Commit the refreshed `eval-report.md`. If no trigger, note `eval: skipped` in the summary.
+
+**Single-ticket mode:** the suite is green for the ticket, a repair PR is open and linked to the run (human merges), or a bug is filed and linked — **and** eval step above satisfied.
+
+**Backlog mode:** PR opened and linked to the ticket, `tests-generated` label applied (unless stopped by repeated identical failure) — **and** eval step above satisfied.
+
+**Red-run heal mode:** triage complete; drift → repair PR linked to run (human merges); real app bug → Jira bug filed and linked (human approved filing) — **and** eval step above satisfied.

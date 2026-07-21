@@ -18,6 +18,10 @@ export class ProgramRow {
     this.row = page.getByRole('row').filter({ has: this.editButton });
   }
 
+  async select(): Promise<void> {
+    await this.row.getByText(this.programName, { exact: true }).click();
+  }
+
   async clickEdit(): Promise<void> {
     await this.editButton.click();
   }

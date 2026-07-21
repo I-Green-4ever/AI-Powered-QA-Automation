@@ -1,0 +1,91 @@
+name: Test Generation
+
+on:
+  schedule:
+    # 9:00 PM EST Mon–Fri (02:00 UTC)
+    - cron: '0 1 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: test-generation
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  generate:
+    name: Generate Playwright tests from backlog
+    runs-on: ubuntu-latest
+    environment: dev1
+    timeout-minutes: 120
+    env:
+      DIDAXIS_URL: ${{ secrets.DIDAXIS_URL }}
+      DIDAXIS_EMAIL: ${{ secrets.DIDAXIS_EMAIL }}
+      DIDAXIS_PASSWORD: ${{ secrets.DIDAXIS_PASSWORD }}
+      DIDAXIS_API_TOKEN: ${{ secrets.DIDAXIS_API_TOKEN }}
+      ATLASSIAN_BASE_URL: ${{ secrets.ATLASSIAN_BASE_URL }}
+      ATLASSIAN_EMAIL: ${{ secrets.ATLASSIAN_EMAIL }}
+      JIRA_PROJECT_KEY: ${{ secrets.JIRA_PROJECT_KEY }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+
+      - name: Install Cursor CLI
+        run: |
+          curl https://cursor.com/install -fsS | bash
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Generate tests from In Progress backlog
+        env:
+          CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
+          ATLASSIAN_API_TOKEN: ${{ secrets.ATLASSIAN_API_TOKEN }}
+          CURSOR_GH_MCP: ${{ secrets.CURSOR_GH_MCP }}
+        run: |
+          agent -p --force --trust --output-format text "$(cat <<'EOF'
+          You are the QA orchestrator for this Playwright test repository. Work the Jira "In Progress" backlog for the DS project.
+
+          Budget: process at most 5 tickets this run. Never merge any pull request.
+
+          For each ticket (up to the budget):
+          1. Analyze the ticket acceptance criteria (use Jira REST API with ATLASSIAN_EMAIL + ATLASSIAN_API_TOKEN against ATLASSIAN_BASE_URL; project key JIRA_PROJECT_KEY).
+          2. Write a conforming Playwright spec under tests/ following .cursor/rules/playwright-conventions.mdc, the pom-conventions skill, and the api-cleanup skill. Use Page Object Models from pages/; do not modify application source.
+          3. Run the spec: npx playwright test <spec-path>
+          4. If the run is green, open a pull request linked to the Jira ticket (reference the ticket key in the branch name, commit message, and PR title/body). Add the label tests-generated to the PR via gh.
+          5. If the run fails due to an app bug, stop on that ticket and summarize the failure; do not open a PR for a red spec.
+
+          Guardrails:
+          - Write only under tests/ (and pages/ if new POM methods are required).
+          - One ticket per branch/PR when possible.
+          - Do not merge PRs; a human approves merge.
+          - Stop when the budget of 5 tickets is reached or the In Progress backlog is exhausted.
+          EOF
+          )"
+
+      - name: Upload Playwright report
+        uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: playwright-report
+          path: playwright-report/
+          retention-days: 30

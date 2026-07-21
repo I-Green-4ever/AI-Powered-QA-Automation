@@ -2,6 +2,7 @@ import type { Locator, Page } from '@playwright/test';
 import { NewProgramModal } from './components/new-program.modal';
 import { EditProgramModal } from './components/edit-program.modal';
 import { ProgramRow } from './components/program-row';
+import { ProgramDetailPanel } from './components/program-detail.panel';
 
 export class ProgramsPage {
   readonly heading: Locator;
@@ -13,6 +14,7 @@ export class ProgramsPage {
   readonly errorHint: Locator;
   readonly newProgram: NewProgramModal;
   readonly editProgram: EditProgramModal;
+  readonly detailPanel: ProgramDetailPanel;
 
   constructor(readonly page: Page) {
     this.heading = page.getByRole('heading', { name: 'Programs' });
@@ -32,6 +34,7 @@ export class ProgramsPage {
     );
     this.newProgram = new NewProgramModal(page);
     this.editProgram = new EditProgramModal(page);
+    this.detailPanel = new ProgramDetailPanel(page);
   }
 
   async goto(): Promise<void> {
